@@ -4,6 +4,9 @@ from typing import TypedDict
 from dataclasses import dataclass
 
 app = modal.App("prefix-rl")
+hf_cache_vol = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
+vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
+
 
 base_image = Image.debian_slim(python_version="3.12")
 
@@ -30,7 +33,7 @@ image_embedding_env = Image.from_registry(
 )
 
 trl_trainer_image = Image.from_registry(
-    "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime"
+    "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel"
 ).pip_install(
     "trl[vllm]",
 )
@@ -155,7 +158,14 @@ class Hyperparameters:
 params = Hyperparameters()
 
 
-@app.function(image=trl_trainer_image, gpu="A100:4")
+@app.function(
+    image=trl_trainer_image,
+    gpu="A100:4",
+    volumes={
+        "/root/.cache/huggingface": hf_cache_vol,
+        "/root/.cache/vllm": vllm_cache_vol,
+    },
+)
 @modal.concurrent(
     # WARN: this is actually not the real batch size, because we're batching in the trainer and sending one request at a time.
     max_inputs=8
@@ -170,7 +180,7 @@ def vllm_server():
         "vllm-serve",
         "--model",
         params.model,
-        "--uvicorn-log-level=info",
+        "--log-level=info",
         "--tensor-parallel-size",
         "2",
         "--data-parallel-size",
@@ -181,8 +191,6 @@ def vllm_server():
         "0.0.0.0",
         "--port",
         str(VLLM_PORT),
-        "--api-key",
-        API_KEY,
     ]
     print(f"$ {' '.join(args)}")
     process = subprocess.Popen(args, text=True)
