@@ -158,9 +158,53 @@ class Hyperparameters:
 params = Hyperparameters()
 
 
+@app.function(image=base_image.pip_install("fastapi", "uvicorn"))
+@modal.web_server(8000, startup_timeout=10 * MINUTE)
+def my_file_server():
+    with open("health_server.py", "w") as f:
+        f.write("""
+from fastapi import FastAPI
+import uvicorn
+from time import sleep
+from contextlib import asynccontextmanager
+import uuid
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("health_server")
+logger.info("Startup.")
+
+wait_time = 2.4
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info(f"Lifespan waiting {wait_time} seconds")
+    # Simulate slow startup like vllm_serve.py
+    sleep(wait_time)
+    logger.info("Lifespan ready")
+    yield
+    logger.info("Lifespan ending...")
+
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/health/")
+async def health():
+    unique_id = str(uuid.uuid4())
+    return {"status": f"waited {wait_time} seconds", "unique_id": unique_id}
+
+uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+""")
+
+    import subprocess
+
+    subprocess.Popen("python health_server.py", shell=True)
+
+
 @app.function(
+    max_containers=1,
     image=trl_trainer_image,
-    gpu="A100:4",
+    gpu="A100:1",
+    # gpu="A100:4",
     volumes={
         "/root/.cache/huggingface": hf_cache_vol,
         "/root/.cache/vllm": vllm_cache_vol,
@@ -168,7 +212,7 @@ params = Hyperparameters()
 )
 @modal.concurrent(
     # WARN: this is actually not the real batch size, because we're batching in the trainer and sending one request at a time.
-    max_inputs=8
+    max_inputs=100
 )
 @modal.web_server(port=VLLM_PORT, startup_timeout=5 * MINUTE)
 def vllm_server():
@@ -193,8 +237,7 @@ def vllm_server():
         str(VLLM_PORT),
     ]
     print(f"$ {' '.join(args)}")
-    process = subprocess.Popen(args, text=True)
-    process.wait()
+    subprocess.run(args, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
 # this will take ~8 days to train. Since we're going to get timed out, we should just run for an hour at a time then save/restore?
