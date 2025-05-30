@@ -1,0 +1,98 @@
+data:
+  train_files: MrOvkill/svg-stack-labeled@train
+  val_files: MrOvkill/svg-stack-labeled@test
+  # prompt_key: problem
+  answer_key: svg
+  image_key: image
+  max_prompt_length: 30000
+  max_response_length: 30000
+  # "During training, we use the GRPO algorithm with a rollout batch size of 32 images per step"
+  rollout_batch_size: 32
+  val_batch_size: 1024
+  format_prompt: ./svg/svg_format.jinja
+  override_chat_template: null
+  shuffle: true
+  seed: 1
+  max_pixels: 4194304
+  min_pixels: 262144
+  filter_overlong_prompts: true
+
+algorithm:
+  adv_estimator: grpo
+  # following rlrf paper, "KL regularization is disabled (KL coefficient = 0), with a clipping threshold ϵ = 0.4"
+  disable_kl: true
+  use_kl_loss: false
+
+worker:
+  actor:
+    global_batch_size: 128
+    micro_batch_size_per_device_for_update: 4
+    micro_batch_size_per_device_for_experience: 16
+    max_grad_norm: 1.0
+    padding_free: true
+    ulysses_sequence_parallel_size: 1
+    model:
+      # We fine-tune Qwen2.5-VL models (3B and 7B)
+      model_path: Qwen/Qwen2.5-VL-3B-Instruct
+      # model_path: Qwen/Qwen2.5-VL-7B-Instruct
+      enable_gradient_checkpointing: true
+      trust_remote_code: false
+      freeze_vision_tower: false
+    optim:
+      lr: 1.0e-5
+      # TODO: we use a learning rate of 1e−5 with 70% decay every 100 steps
+      weight_decay: 1.0e-2
+      strategy: adamw  # {adamw, adamw_bf16}
+      lr_warmup_ratio: 0.0
+    fsdp:
+      enable_full_shard: true
+      enable_cpu_offload: false
+      enable_rank0_init: true
+    offload:
+      offload_params: true  # true: more CPU memory; false: more GPU memory
+      offload_optimizer: true  # true: more CPU memory; false: more GPU memory
+
+  rollout:
+    # "For each image, 64 rollouts are generated"
+    n: 64
+    # "sampling temperature set to 1.1"
+    temperature: 1.1
+    top_p: 0.99
+    gpu_memory_utilization: 0.6
+    enforce_eager: false
+    enable_chunked_prefill: false
+    tensor_parallel_size: 2
+    limit_images: 0
+    val_override_config:
+      temperature: 0.5
+      n: 1
+
+  ref:
+    fsdp:
+      enable_full_shard: true
+      enable_cpu_offload: true  # true: more CPU memory; false: more GPU memory
+      enable_rank0_init: true
+    offload:
+      offload_params: false
+
+  reward:
+    reward_type: batch
+    reward_function: ./examples/reward_function/math.py:compute_score
+
+trainer:
+  total_epochs: 15
+  # "We train for 500 steps in total, covering 16k unique images, significantly fewer than the 1.7M samples used in SVG-SFT"
+  max_steps: 500
+  project_name: svg_rlrf
+  experiment_name: qwen2_5_vl_3b_svg_grpo
+  logger: ["console", "wandb"]
+  nnodes: 1
+  n_gpus_per_node: 8
+  val_freq: 5  # -1 to disable
+  val_before_train: true
+  val_only: false
+  val_generations_to_log: 3
+  save_freq: 5  # -1 to disable
+  save_limit: 3  # -1 to disable
+  save_checkpoint_path: null
+  load_checkpoint_path: null

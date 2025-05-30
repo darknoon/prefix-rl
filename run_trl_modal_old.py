@@ -3,7 +3,7 @@ from modal import Image
 from typing import TypedDict
 from dataclasses import dataclass
 
-app = modal.App("prefix-rl")
+app = modal.App(name="prefix-rl")
 hf_cache_vol = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
 vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
 
@@ -121,7 +121,7 @@ def compare_images(image_bytes: bytes, reference_bytes: bytes) -> ImageCompariso
 
 @app.function(image=browser_env_image)
 async def rasterize_svg(text: str, width: int = 512, height: int = 512) -> bytes:
-    from svg_renderer import rasterize_svg
+    from svg_renderer_browser import rasterize_svg
 
     return await rasterize_svg(text, width, height)
 
