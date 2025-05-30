@@ -20,12 +20,17 @@ HOUR = 60 * MINUTE
 
 @app.function(
     image=trainer_with_files,
-    gpu="A100:8",
-    timeout=1 * HOUR,
+    gpu="H100:8",
+    timeout=1 * HOUR,  # will not complete but just test that it's working
     volumes={
         "/root/.cache/huggingface": hf_cache_vol,
         "/root/.cache/vllm": vllm_cache_vol,
     },
+    secrets=[
+        # for logging to wandb
+        modal.Secret.from_name("wandb-darknoon"),
+        modal.Secret.from_name("huggingface-write"),
+    ],
 )
 def train_model_easyr1():
     import subprocess
