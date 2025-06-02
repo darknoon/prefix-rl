@@ -1,129 +1,309 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright 2025 Andrew Pouliot
+# Based on https://arxiv.org/pdf/2505.20793
+
 
 import re
+import cairosvg.parser, cairosvg.surface
 from cairosvg import svg2png
+
 from dataclasses import dataclass
 import torch
-
-from transformers import AutoProcessor, AutoModel
+import torch.nn.functional as F
 from PIL import Image as PILImage
 import io
 import numpy as np
-import torch.nn.functional as F
+import torchvision.transforms as T
+import os
+import tempfile
+
+from dreamsim import dreamsim
+
+
+def normalize_image(x: torch.Tensor) -> torch.Tensor:
+    """Normalize image tensor to zero mean and unit variance."""
+    # img_tensor should be [C, H, W] or [B, C, H, W]
+    if x.ndim == 3:
+        # Add batch dimension if not present
+        x = x.unsqueeze(0)
+
+    # Calculate mean and std across spatial dimensions
+    # Keep dims to ensure broadcasting works correctly
+    mean = x.mean(dim=(-2, -1), keepdim=True)
+    std = (
+        x.std(dim=(-2, -1), keepdim=True) + 1e-6
+    )  # Add epsilon to avoid division by zero
+
+    # Normalize
+    return (x - mean) / std
+
+
+def canny(
+    image_tensor: torch.Tensor,
+    device: torch.device | str,
+    low_thresh_factor: float = 0.1,
+    high_thresh_factor: float = 0.2,
+    gaussian_kernel_size: int = 5,
+    gaussian_sigma: float = 1.0,
+    dilate_kernel_size: int = 3,
+    dilate_iterations: int = 1,
+    final_blur_size: int = 13,
+    final_blur_sigma: float = 1.0,
+) -> torch.Tensor:
+    """
+    Applies Canny-like edge detection using PyTorch, followed by dilation and Gaussian blur.
+    Input should be a tensor [B, C, H, W] or [C, H, W] in range [0, 1].
+    Output is a tensor of same spatial dimensions with edge intensities.
+    """
+    if isinstance(device, str):
+        device = torch.device(device)
+
+    # Ensure 4D input [B, C, H, W]
+    if image_tensor.ndim == 3:
+        image_tensor = image_tensor.unsqueeze(0)
+
+    # Convert to grayscale if needed
+    if image_tensor.shape[1] == 3:
+        # weights for RGB to grayscale conversion
+        rgb_weights = torch.tensor([0.2989, 0.5870, 0.1140], device=device).view(
+            1, 3, 1, 1
+        )
+        img_gray = (image_tensor * rgb_weights).sum(dim=1, keepdim=True)
+    else:
+        img_gray = image_tensor
+
+    # 1. Initial Gaussian Blur
+    blur_transform = T.GaussianBlur(
+        kernel_size=(gaussian_kernel_size, gaussian_kernel_size),
+        sigma=(gaussian_sigma, gaussian_sigma),
+    )
+    img_blurred = blur_transform(img_gray)
+
+    # 2. Sobel Filters for Gradients
+    sobel_x = torch.tensor(
+        [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], device=device, dtype=img_blurred.dtype
+    ).view(1, 1, 3, 3)
+    sobel_y = torch.tensor(
+        [[-1, -2, -1], [0, 0, 0], [1, 2, 1]], device=device, dtype=img_blurred.dtype
+    ).view(1, 1, 3, 3)
+
+    grad_x = F.conv2d(img_blurred, sobel_x, padding=1)
+    grad_y = F.conv2d(img_blurred, sobel_y, padding=1)
+
+    # 3. Gradient Magnitude
+    grad_magnitude = torch.sqrt(grad_x**2 + grad_y**2)
+
+    # Normalize magnitude to 0-1
+    grad_magnitude = grad_magnitude / (grad_magnitude.max() + 1e-6)
+
+    # 4. Thresholding (simplified Canny)
+    edges = (grad_magnitude > high_thresh_factor).float()
+
+    # 5. Dilation
+    if dilate_iterations > 0:
+        dilation_kernel = torch.ones(
+            1,
+            1,
+            dilate_kernel_size,
+            dilate_kernel_size,
+            device=device,
+            dtype=edges.dtype,
+        )
+        for _ in range(dilate_iterations):
+            edges = F.conv2d(
+                edges,
+                dilation_kernel,
+                padding=dilate_kernel_size // 2,
+                groups=edges.shape[1],  # Apply to each channel independently
+            )
+            edges = (edges > 0).float()  # Threshold to keep binary
+
+    # 6. Final Gaussian Blur
+    final_blur = T.GaussianBlur(
+        kernel_size=(final_blur_size, final_blur_size),
+        sigma=(final_blur_sigma, final_blur_sigma),
+    )
+    edges_blurred = final_blur(edges)
+
+    return edges_blurred
+
+
+def edge_to_pil(edge_map_tensor: torch.Tensor) -> PILImage.Image:
+    """Converts a edge map tensor [B, 1, H, W] or [1, H, W] to a 1-channel PIL Image."""
+    if edge_map_tensor.ndim == 4:
+        edge_map_tensor = edge_map_tensor.squeeze(0)  # Remove batch dim
+    if edge_map_tensor.ndim != 3:
+        raise ValueError(
+            f"Edge map tensor must be 3D after removing batch dim, got {edge_map_tensor.ndim} dimensions"
+        )
+
+    # Convert to PIL and then to RGB
+    edge_map_pil = T.ToPILImage()(edge_map_tensor.cpu())
+    return edge_map_pil
 
 
 @dataclass
 class ImageComparisonResult:
-    l2: float
-    clip_vit_b_32: float
+    l2: float  # L2 distance between normalized images
+    l2_canny: float  # L2 distance between Canny edge maps
+    dreamsim: float  # DreamSim distance (lower is more similar)
+    dreamsim_canny: float  # DreamSim distance on edge maps
+    canny_im: PILImage.Image  # Canny edge map of the image
+    canny_im_ref: PILImage.Image  # Canny edge map of the reference image
+
+
+def l2(x: torch.Tensor, y: torch.Tensor) -> float:
+    return torch.norm(x - y) / np.sqrt(x.numel())
 
 
 class ImageComparator:
-    def __init__(self, device: str = "cpu"):
-        self.processor = AutoProcessor.from_pretrained(
-            "openai/clip-vit-base-patch32", use_fast=True
-        )
-        self.model = AutoModel.from_pretrained("openai/clip-vit-base-patch32")
+    def __init__(
+        self,
+        device: str = "cpu",
+        dreamsim_cache_dir: str = os.environ.get("DREAMSIM_CACHE_DIR", "./models"),
+    ):
         self.device = device
-        self.model.to(self.device)
-
-    def process_image(self, image_bytes: bytes):
-        """Process image bytes into RGB PIL Image."""
-
-        image = PILImage.open(io.BytesIO(image_bytes))
-        image = image.convert("RGB")
-        return image
+        print("Loading DreamSim model (from dreamsim library)...")
+        try:
+            self.dreamsim_model, self.dreamsim_preprocess = dreamsim(
+                pretrained=True, device=self.device, cache_dir=dreamsim_cache_dir
+            )
+            self.dreamsim_model.eval()
+            print("DreamSim model and preprocessor loaded successfully.")
+        except Exception as e:
+            print(f"Failed to load DreamSim model from library: {e}")
+            print(
+                "Please ensure the 'dreamsim' library is installed and torch.hub caching is working."
+            )
+            raise
 
     @torch.no_grad()
-    def get_image_embedding(self, image, size=(224, 224)):
-        """Get normalized vision embedding for an image."""
-        image = image.resize(size)
-        inputs = self.processor(images=image, return_tensors="pt")
-        embedding = self.model.get_image_features(**inputs)
-        return embedding / embedding.norm(dim=-1, keepdim=True)
-
     def compare_images(
-        self, image_bytes: bytes, reference_bytes: bytes
-    ) -> ImageComparisonResult:
-        """Compare two images using L2 distance and vision embedding similarity.
-
-        Args:
-            image_bytes: PNG image bytes of the first image
-            reference_bytes: PNG image bytes of the reference image to compare against
-
-        Returns:
-            Dict containing l2_distance and embedding_similarity metrics
+        self, im: PILImage.Image, im_ref: PILImage.Image
+    ) -> ImageComparisonResult | None:
+        """
+        Compare two images using multiple metrics:
+        1. L2 distance between normalized images
+        2. L2 distance between Canny edge maps (with dilation and blur)
+        3. DreamSim distance on original images
+        4. DreamSim distance on edge maps
         """
 
-        # Load and process images
-        image = self.process_image(image_bytes)
-        reference = self.process_image(reference_bytes)
+        to_tensor = T.ToTensor()
 
-        # Calculate L2 distance
-        if image.size != reference.size:
-            # resize image to reference size
-            image = image.resize(reference.size)
-            # warn
-            print(
-                f"Image size {image.size} does not match reference size {reference.size}, resizing image to reference size. Results may be inaccurate."
+        try:
+            # Convert PIL images to RGB
+            im = im.convert("RGB")
+            im_ref = im_ref.convert("RGB")
+
+            # Convert PIL to tensors [0,1]
+            tensor = to_tensor(im).to(self.device)
+            tensor_ref = to_tensor(im_ref).to(self.device)
+
+            # 1. L2 on normalized images
+            l2_distance = l2(normalize_image(tensor), normalize_image(tensor_ref))
+
+            # 2. L2 on Canny edge maps
+            edge_map = canny(tensor, self.device)
+            edge_map_ref = canny(tensor_ref, self.device)
+            l2_canny = l2(edge_map, edge_map_ref)
+
+            # 3. DreamSim
+            dreamsim_distance = float(
+                self.dreamsim_model(
+                    self.dreamsim_preprocess(im),
+                    self.dreamsim_preprocess(im_ref),
+                )
             )
 
-        img_array = np.array(image)
-        ref_array = np.array(reference)
+            # 4. DreamSim Canny
+            pil_canny = edge_to_pil(edge_map)
+            pil_canny_ref = edge_to_pil(edge_map_ref)
+            dreamsim_canny_distance = float(
+                self.dreamsim_model(
+                    self.dreamsim_preprocess(pil_canny.convert("RGB")),
+                    self.dreamsim_preprocess(pil_canny_ref.convert("RGB")),
+                )
+            )
 
-        l2_distance = np.sqrt(np.sum((img_array - ref_array) ** 2)) / (
-            img_array.size * 255
-        )
+            return ImageComparisonResult(
+                l2=float(l2_distance),
+                l2_canny=float(l2_canny),
+                dreamsim=dreamsim_distance,
+                dreamsim_canny=dreamsim_canny_distance,
+                canny_im=pil_canny,
+                canny_im_ref=pil_canny_ref,
+            )
 
-        # Get embeddings and calculate similarity
-        emb_image = self.get_image_embedding(image)
-        emb_reference = self.get_image_embedding(reference)
-        embedding_similarity = F.cosine_similarity(emb_image, emb_reference).item()
+        except Exception as e:
+            import traceback
 
-        return {
-            "l2": float(l2_distance),
-            "clip_vit_b_32": float(embedding_similarity),
-        }
-
-
-def dream_sim_reward(svg: str, reference: str) -> float:
-    """
-    Semantic Similarity Rewards For semantic-level rewards, we use DreamSim [Fu et al., 2023],
-    which encodes each image using three ViT-B/16 backbones - CLIP, OpenCLIP [Cherti et al., 2023],
-    and DINOv2 [Oquab et al., 2023]. Their feature vectors are concatenated, passed through a linear
-    projection, and compared using cosine similarity. This provides a meaningful semantic similarity
-    signal for the Im2SVG task. For shape-focused feedback, we apply DreamSim Canny, which uses
-    an edge detector on both prediction and target images before computing DreamSim. A comparison
-    of edge maps emphasizes crisp contours and geometric accuracy while remaining insensitive to
-    variation in color or texture. We convert the similarity score sim ∈ [-1, 1] to a reward using
-    Rsim = 1 - 2 * sim, where higher values indicate stronger semantic alignment. For the Text2SVG
-    task, we use CLIP as a reward to compute the cosine similarity between the text prompt and the
-    rendered SVG image in the embedding space. We also utilize VLM as a judge to assess the quality of
-    generation (see more details about Text2SVG rewards in Appendix A.2)."""
-    pass
+            print(f"Error during image comparison: {e}")
+            print("Backtrace:")
+            print(traceback.format_exc())
+            return None
 
 
-def rasterize_svg(svg_content: str, width=1200, height=800) -> bytes:
+def get_svg_size(tree: cairosvg.parser.Tree) -> tuple[int, int]:
+    width = tree.get("width")
+    height = tree.get("height")
+
+    if width is None or height is None:
+        # Get viewBox if size not specified
+        viewbox = tree.get("viewBox")
+        if viewbox:
+            # viewBox format is "min-x min-y width height"
+            parts = viewbox.split()
+            if len(parts) == 4:
+                width = parts[2]
+                height = parts[3]
+
+    # Default to 512x512 if no size info found
+    width = width or "512"
+    height = height or "512"
+
+    return float(width), float(height)
+
+
+def rasterize_svg(
+    svg_content: str, width: float | None = None, height: float | None = None
+) -> bytes:
     """Rasterize SVG content to PNG image bytes using CairoSVG."""
-    return svg2png(
-        bytestring=svg_content.encode("utf-8"), output_width=width, output_height=height
+    tree = cairosvg.parser.Tree(bytestring=svg_content.encode("utf-8"))
+    # get the width and height from the tree
+    if width is None or height is None:
+        width, height = get_svg_size(tree)
+    else:
+        width = float(width)
+        height = float(height)
+
+    output = io.BytesIO()
+    dpi = 96
+    parent_width = width
+    parent_height = height
+    scale = 1
+    output_width = width
+    output_height = height
+    # The LLM does not support transparent backgrounds, so to avoid confusion,
+    # we use a white background.
+    background_color = "white"
+    instance = cairosvg.surface.PNGSurface(
+        tree,
+        output,
+        dpi,
+        None,
+        parent_width,
+        parent_height,
+        scale,
+        output_width,
+        output_height,
+        background_color,
     )
+    instance.finish()
+    return output.getvalue()
 
 
 def format_reward(predict: str) -> float:
-    pattern = re.compile(r"<think>.*?</think>\s*<answer>.*?</answer>", re.DOTALL)
+    pattern = re.compile(r"<think>.*?</think>\s*<answer>.*?</answer>\s{0,3}", re.DOTALL)
     format_match = re.fullmatch(pattern, predict)
     return 1.0 if format_match else 0.0
 
@@ -134,44 +314,147 @@ def extract_svg_text(full_response: str) -> str:
     return match.group(0).strip() if match else ""
 
 
-# TODO: support unloading
+# TODO: support unloading the weights so we can use GPU / not take up vram
 image_comparator = ImageComparator()
 
 
-def compute_score(
-    predict: str, ground_truth: str, format_weight: float = 0.5
+def length_reward(L_pred: float, L_gt: float) -> float:
+    """
+    Compute the SVG Length Deviation reward:
+        R_len = 1 - ( (1/L_gt) * max(0, L_pred - L_gt/2) )^2
+
+    Args:
+        L_pred: predicted SVG token length
+        L_gt:   ground-truth SVG token length
+
+    Returns:
+        R_len: reward in [−∞, 1], penalizing over-length predictions
+    """
+    # how much we exceed half the ground-truth length
+    excess = max(0.0, L_pred - 0.5 * L_gt)
+    # normalized penalty squared
+    penalty = (excess / L_gt) ** 2
+    return 1.0 - penalty
+
+
+@dataclass
+class PreprocessedResponse:
+    response_str: str
+    svg: str
+    svg_gt: str
+    svg_im: PILImage.Image
+    svg_im_gt: PILImage.Image
+
+
+def format_svg(thinking: str = "", svg: str = "") -> str:
+    if svg == "":
+        raise ValueError("SVG cannot be empty")
+    return f"<think>{thinking}</think>\n<answer>{svg}</answer>"
+
+
+def svg_env(response_str: str, svg_gt: str) -> PreprocessedResponse:
+    """
+    Turns a response and ground truth svg (just the content within <answer> tags) into rasterized images for comparison.
+    Also computes the format and length rewards.
+    """
+    svg = extract_svg_text(response_str)
+    svg_im_bytes = rasterize_svg(svg)
+    svg_im = PILImage.open(io.BytesIO(svg_im_bytes))
+    svg_gt_bytes = rasterize_svg(svg_gt)
+    svg_gt_im = PILImage.open(io.BytesIO(svg_gt_bytes))
+    return PreprocessedResponse(
+        response_str=response_str,
+        svg=svg,
+        svg_gt=svg_gt,
+        svg_im=svg_im,
+        svg_im_gt=svg_gt_im,
+    )
+
+
+def reward_from_distance(distance: float) -> float:
+    return 1.0 - distance
+
+
+def compute_rewards(
+    p: PreprocessedResponse, image_scores: ImageComparisonResult | None = None
 ) -> dict[str, float]:
-    format_score = format_reward(predict)
-    svg = extract_svg_text(predict)
-    im = rasterize_svg(svg)
-    gt_im = rasterize_svg(ground_truth)
-    image_scores = image_comparator.compare_images(im, gt_im)
-    score_weights = {
-        "format": format_weight,
-        "l2": 0.5,
-        "clip_vit_b_32": 0.5,
+    try:
+        format_score = format_reward(p.response_str)
+        length_score = length_reward(len(p.response_str), len(format_svg(svg=p.svg)))
+    except Exception as e:
+        print(f"Error in image comparison: {e}")
+        image_scores = None
+
+    reward_weights = {
+        "format": 1.0,
+        "length": 1.0,
+        "l2": 1.0,
+        "l2_canny": 1.0,
+        "dreamsim": 1.0,
+        "dreamsim_canny": 1.0,
     }
-    return {
-        "overall": sum(
-            [image_scores[k] * score_weights[k] for k in image_scores.keys()]
-        )
-        / sum(score_weights.values()),
+
+    # Build scores dict with only available metrics
+    scores_dict = {
         "format": format_score,
-        **image_scores,
+        "length": length_score,
     }
+
+    if image_scores is not None:
+        scores_dict.update(
+            {
+                "l2": image_scores.l2,
+                "l2_canny": image_scores.l2_canny,
+                "dreamsim": image_scores.dreamsim,
+                "dreamsim_canny": image_scores.dreamsim_canny,
+            }
+        )
+
+    # Apply weights to available scores
+    result = {k: v * reward_weights[k] for k, v in scores_dict.items()}
+
+    w_valid = sum(reward_weights[k] for k in scores_dict.keys())
+    result["overall"] = (
+        sum(v * reward_weights[k] for k, v in scores_dict.items()) / w_valid
+    )
+
+    return result
+
+
+def render_and_compute_rewards(response_str: str, svg_gt: str) -> dict[str, float]:
+    p = svg_env(response_str, svg_gt)
+    return compute_rewards(p)
 
 
 if __name__ == "__main__":
-    svg = """
-    <svg width='512' height='512'><circle cx='256' cy='256' r='192' stroke='black' stroke-width='3' fill='red' /></svg>
-    """
+    gt = """
+<svg width='512' height='512'><circle cx='256' cy='256' r='192' stroke='black' stroke-width='3' fill='red' /></svg>
+"""
 
-    response = """
+    # radius differs by 3
+    response = """\
 <think>
-I think this is just a circle.
+I think this is just a circle, so it should be easy to generate.
 </think>
 <answer>
-<svg width='512' height='512'><circle cx='256' cy='256' r='200' stroke='black' stroke-width='3' fill='red' /></svg>
-</answer>
+<svg width='512' height='512'><circle cx='256' cy='256' r='195' stroke='black' stroke-width='3' fill='red' /></svg>
+</answer>\
 """
-    print(compute_score(response, svg))
+    p = svg_env(response, gt)
+    im = image_comparator.compare_images(p.svg_im, p.svg_im_gt)
+
+    tempdir = tempfile.mkdtemp()
+    print(f"Writing comparison images to: {tempdir}")
+    images = {
+        "response": (p.svg_im, "res.png"),
+        "ground truth": (p.svg_im_gt, "gt.png"),
+        "response canny": (im.canny_im, "res-canny.png"),
+        "ground truth canny": (im.canny_im_ref, "gt-canny.png"),
+    }
+
+    for name, (image, filename) in images.items():
+        dest = f"{tempdir}/{filename}"
+        image.save(dest, format="PNG")
+        print(f"Saved {name} to {dest}")
+    scores = compute_rewards(p, im)
+    print("\n".join([f"{k}: {v:.3f}" for k, v in scores.items()]))

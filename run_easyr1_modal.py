@@ -3,13 +3,19 @@ from modal import Image
 
 app = modal.App("prefix-rl-easyr1")
 hf_cache_vol = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
+torch_hub_cache_vol = modal.Volume.from_name("torch-hub-cache", create_if_missing=True)
 vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
 
-trainer_image = Image.from_registry(
-    "hiyouga/verl:ngc-th2.6.0-cu126-vllm0.8.4-flashinfer0.2.2-cxx11abi0"
-).run_commands(
-    "apt-get update",
-    "apt-get install -y libcairo2 libpango-1.0-0 libpangocairo-1.0-0 gdk-pixbuf2.0-0 libffi-dev libxml2 libpng-dev zlib1g",
+trainer_image = (
+    Image.from_registry(
+        "hiyouga/verl:ngc-th2.6.0-cu126-vllm0.8.4-flashinfer0.2.2-cxx11abi0"
+    )
+    .run_commands(
+        "apt-get update",
+        "apt-get install -y libcairo2 libpango-1.0-0 libpangocairo-1.0-0 gdk-pixbuf2.0-0 libffi-dev libxml2 libpng-dev zlib1g",
+    )
+    # install for svg rlrf
+    .pip_install("dreamsim")
 )
 
 trainer_with_files = (
@@ -42,6 +48,7 @@ default_args = {
     volumes={
         "/root/.cache/huggingface": hf_cache_vol,
         "/root/.cache/vllm": vllm_cache_vol,
+        "/root/.cache/torch": torch_hub_cache_vol,
     },
     secrets=[
         # for logging to wandb
@@ -51,20 +58,41 @@ default_args = {
 )
 def train_model_easyr1(args=default_args):
     import os
-    import sys
-    from verl.trainer.main import main
 
     os.environ["PYTHONUNBUFFERED"] = "1"
 
-    # Convert args dict to list of strings and prepend with script name
-    # This matches how sys.argv would look when called from command line
-    args_list = ["dummy_script_name"]
-    for k, v in args.items():
-        args_list.append(f"{k}={v}")
+    from omegaconf import OmegaConf
+    import ray
+    from verl.trainer.main import Runner
+    from verl.trainer.config import PPOConfig
 
-    # Set sys.argv since OmegaConf.from_cli() reads from it
-    sys.argv = args_list
-    main()
+    cli_args = OmegaConf.from_dict(args)
+    default_config = OmegaConf.structured(PPOConfig())
+
+    if hasattr(cli_args, "config"):
+        config_path = cli_args.pop("config", None)
+        file_config = OmegaConf.load(config_path)
+        default_config = OmegaConf.merge(default_config, file_config)
+
+    ppo_config = OmegaConf.merge(default_config, cli_args)
+    ppo_config: PPOConfig = OmegaConf.to_object(ppo_config)
+    ppo_config.deep_post_init()
+
+    if not ray.is_initialized():
+        runtime_env = {
+            "env_vars": {
+                "TOKENIZERS_PARALLELISM": "true",
+                "NCCL_DEBUG": "WARN",
+                "VLLM_LOGGING_LEVEL": "WARN",
+                "TORCH_NCCL_AVOID_RECORD_STREAMS": "1",
+                "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False",
+                "PYTHONUNBUFFERED": "1",
+            }
+        }
+        ray.init(runtime_env=runtime_env)
+
+    runner = Runner.remote()
+    ray.get(runner.run.remote(ppo_config))
 
 
 @app.local_entrypoint()
