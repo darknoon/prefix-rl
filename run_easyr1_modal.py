@@ -69,8 +69,19 @@ args_svg_rlrf = {
         modal.Secret.from_name("huggingface-write"),
     ],
 )
-def train_model_easyr1(args=default_args):
+def train_model_easyr1(*arglist):
     import os
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config", type=str, default="default", choices=["default", "svg"]
+    )
+    cli_args = parser.parse_args(arglist)
+
+    config = args_svg_rlrf if cli_args.config == "svg" else default_args
+
+    print(f"Using config: {config}")
 
     os.environ["PYTHONUNBUFFERED"] = "1"
 
@@ -79,12 +90,14 @@ def train_model_easyr1(args=default_args):
     from verl.trainer.main import Runner
     from verl.trainer.config import PPOConfig
 
-    cli_args = OmegaConf.create(args)
+    cli_args = OmegaConf.create(config)
     default_config = OmegaConf.structured(PPOConfig())
 
     if hasattr(cli_args, "config"):
         config_path = cli_args.pop("config", None)
         file_config = OmegaConf.load(config_path)
+        print(f"Loaded config from {config_path}:")
+        print(file_config)
         default_config = OmegaConf.merge(default_config, file_config)
 
     ppo_config = OmegaConf.merge(default_config, cli_args)
