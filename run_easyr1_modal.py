@@ -22,7 +22,7 @@ trainer_with_files = (
     trainer_image.run_commands(
         "git clone https://github.com/hiyouga/EasyR1.git /root/EasyR1"
     )
-    .add_local_dir("env/svg", "/root/EasyR1/svg")
+    .add_local_dir("env/svg", "/root/EasyR1/env/svg")
     .workdir("/root/EasyR1")
 )
 
@@ -37,6 +37,13 @@ default_args = {
     "data.val_files": "hiyouga/geometry3k@test",
     "worker.actor.model.model_path": "Qwen/Qwen2.5-VL-7B-Instruct",
     "trainer.experiment_name": "qwen2_5_vl_7b_geo_grpo",
+    "trainer.n_gpus_per_node": 8,
+}
+
+args_svg_rlrf = {
+    "config": "env/svg/config.yaml",
+    "worker.actor.model.model_path": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "trainer.experiment_name": "qwen2_5_vl_7b_svg_rlrf",
     "trainer.n_gpus_per_node": 8,
 }
 
@@ -97,4 +104,4 @@ def train_model_easyr1(args=default_args):
 
 @app.local_entrypoint()
 def main():
-    app.run(train_model_easyr1)
+    train_model_easyr1.remote(args_svg_rlrf)
