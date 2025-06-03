@@ -22,8 +22,8 @@ trainer_with_files = (
     trainer_image.run_commands(
         "git clone https://github.com/hiyouga/EasyR1.git /root/EasyR1"
     )
-    .add_local_dir("env/svg", "/root/EasyR1/env/svg")
     .workdir("/root/EasyR1")
+    .add_local_dir("env/svg", "/root/EasyR1/env/svg")
 )
 
 
@@ -42,6 +42,8 @@ default_args = {
 
 args_svg_rlrf = {
     "config": "env/svg/config.yaml",
+    "data.train_files": "MrOvkill/svg-stack-labeled@train",
+    "data.val_files": "MrOvkill/svg-stack-labeled@test",
     "worker.actor.model.model_path": "Qwen/Qwen2.5-VL-7B-Instruct",
     "trainer.experiment_name": "qwen2_5_vl_7b_svg_rlrf",
     "trainer.n_gpus_per_node": 8,
@@ -73,7 +75,7 @@ def train_model_easyr1(args=default_args):
     from verl.trainer.main import Runner
     from verl.trainer.config import PPOConfig
 
-    cli_args = OmegaConf.from_dict(args)
+    cli_args = OmegaConf.create(args)
     default_config = OmegaConf.structured(PPOConfig())
 
     if hasattr(cli_args, "config"):
