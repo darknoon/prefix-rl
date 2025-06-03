@@ -6,13 +6,12 @@ Project structure:
 
 Basic setup:
 
-Make sure you have cairo installed (linux):
-```sh
-sudo apt-get install libcairo2-dev
-```
+- We use uv to manage the dependencies.
+- Since you don't have normal internet access, expect to not be able to install more dependencies. However you do have all of the dependencies in pyproject.toml installed already as part of setup.
 
-Use UV to install the dependencies:
-```sh
-uv sync
-```
+
+
+
+
+
 
