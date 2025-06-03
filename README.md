@@ -15,7 +15,6 @@ Implementation of SVG RLRF paper (Im2SVG):
 - [x] Implement mix of image similarity rewards
    - [ ] Small ViewBox Hack (use gt viewbox to render)
    - [ ] SVG Length Collapse: Reward weight scheduling
-   - [ ] Idea: prompt model to start with the gt width/height/viewbox
 - [x] Run on modal
 - [x] RL training setup for SVG fine-tuning (EasyR1)
   - [ ] C.3: Dynamic Max Length
@@ -27,6 +26,15 @@ Implementation of SVG RLRF paper (Im2SVG):
      - [ ] only SVGs with at least 500 tokens
      - [ ] cluster the remaining samples using DINO image features and perform stratified sampling to select 600 examples
 
+Further ideas Im2SVG:
+- [ ] Prompt model to start with the gt width/height/viewbox ie "generate an 100x100 SVG that …"
+- [ ] Test out more featureful renderers
+  - [ ] Skia?
+  - [ ] headless chromium
+- [ ] Test out data generation of easy examples instead of fine-tuning for bootstrapping
+- [ ] Datasets 
+  - [ ] https://huggingface.co/OmniSVG
+  
 Usage:
 ```sh
 modal run --detach run_easyr1_modal.py::train_model_easyr1 --config svg
