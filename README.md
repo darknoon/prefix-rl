@@ -8,3 +8,27 @@ References:
 - https://huggingface.co/papers/2505.20793
   - LLaMA-Factory for SFT
   - EasyR1 for RLRF
+
+
+Implementation of SVG RLRF paper (Im2SVG):
+
+- [x] Implement mix of image similarity rewards
+   - [ ] Small ViewBox Hack (use gt viewbox to render)
+   - [ ] SVG Length Collapse: Reward weight scheduling
+   - [ ] Idea: prompt model to start with the gt width/height/viewbox
+- [x] Run on modal
+- [x] RL training setup for SVG fine-tuning (EasyR1)
+  - [ ] C.3: Dynamic Max Length
+- [x] Dataset
+   - [x] Optimize SVGs, quantize
+   - [ ] Remove blank images
+   - [ ] SVG-Stack-Hard Test Set
+     - [ ] filter out broken SVGs, white-background SVGs, and samples with low color entropy
+     - [ ] only SVGs with at least 500 tokens
+     - [ ] cluster the remaining samples using DINO image features and perform stratified sampling to select 600 examples
+
+Usage:
+```sh
+modal run --detach run_easyr1_modal.py::train_model_easyr1 --config svg
+```
+

@@ -308,7 +308,8 @@ def rasterize_svg(
         background_color,
     )
     instance.finish()
-    return output.getvalue()
+    image_bytes = output.getvalue()
+    return image_bytes, tree, (width, height)
 
 
 def format_reward(predict: str) -> float:
@@ -324,7 +325,11 @@ def extract_svg_text(full_response: str) -> str | None:
 
 
 # TODO: support unloading the weights so we can use GPU / not take up vram
-image_comparator = ImageComparator()
+def get_image_comparator() -> ImageComparator:
+    global image_comparator
+    if image_comparator is None:
+        image_comparator = ImageComparator()
+    return image_comparator
 
 
 def length_reward(L_pred: float, L_gt: float) -> float:
@@ -385,9 +390,9 @@ def svg_env(response_str: str, svg_gt: str) -> PreprocessedResponse | None:
     svg = extract_svg_text(response_str)
     if svg is None:
         return None
-    svg_im_bytes = rasterize_svg(svg)
+    svg_im_bytes, _, _ = rasterize_svg(svg)
     svg_im = PILImage.open(io.BytesIO(svg_im_bytes))
-    svg_gt_bytes = rasterize_svg(svg_gt)
+    svg_gt_bytes, _, _ = rasterize_svg(svg_gt)
     svg_gt_im = PILImage.open(io.BytesIO(svg_gt_bytes))
     return PreprocessedResponse(
         response_str=response_str,
@@ -494,7 +499,7 @@ def render_and_compute_rewards(response_str: str, svg_gt: str) -> SVGRewards | N
     p = svg_env(response_str, svg_gt)
     image_scores = None
     if p is not None:
-        image_scores = image_comparator.compare_images(p.svg_im, p.svg_im_gt)
+        image_scores = get_image_comparator().compare_images(p.svg_im, p.svg_im_gt)
     return compute_rewards(p, image_scores)
 
 
@@ -517,7 +522,7 @@ if __name__ == "__main__":
         add_line_breaks=True,
     )
     p = svg_env(response, circle_svg(200))
-    im = image_comparator.compare_images(p.svg_im, p.svg_im_gt)
+    im = get_image_comparator().compare_images(p.svg_im, p.svg_im_gt)
 
     tempdir = tempfile.mkdtemp()
     thinking = "I think this is just a circle, so it should be easy to generate."
