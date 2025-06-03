@@ -584,7 +584,7 @@ if __name__ == "__main__":
             print(f"  Response: {response}")
             print(f"  SVG GT: {svg_gt}")
             continue
-        im = image_comparator.compare_images(p.svg_im, p.svg_im_gt)
+        im = get_image_comparator().compare_images(p.svg_im, p.svg_im_gt)
         tempdir = tempfile.mkdtemp()
         print(f"Writing comparison images to: {tempdir}")
         rewards = compute_rewards(p, im)
