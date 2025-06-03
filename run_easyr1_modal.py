@@ -33,20 +33,24 @@ HOUR = 60 * MINUTE
 
 default_args = {
     "config": "examples/config.yaml",
-    "data.train_files": "hiyouga/geometry3k@train",
-    "data.val_files": "hiyouga/geometry3k@test",
-    "worker.actor.model.model_path": "Qwen/Qwen2.5-VL-7B-Instruct",
-    "trainer.experiment_name": "qwen2_5_vl_7b_geo_grpo",
-    "trainer.n_gpus_per_node": 8,
+    "data": {
+        "train_files": "hiyouga/geometry3k@train",
+        "val_files": "hiyouga/geometry3k@test",
+    },
+    "worker": {"actor": {"model": {"model_path": "Qwen/Qwen2.5-VL-7B-Instruct"}}},
+    "trainer": {
+        "experiment_name": "qwen2_5_vl_7b_geo_grpo",
+        "n_gpus_per_node": 8,
+    },
 }
 
 args_svg_rlrf = {
-    "config": "env/svg/config.yaml",
-    "data.train_files": "MrOvkill/svg-stack-labeled@train",
-    "data.val_files": "MrOvkill/svg-stack-labeled@test",
-    "worker.actor.model.model_path": "Qwen/Qwen2.5-VL-7B-Instruct",
-    "trainer.experiment_name": "qwen2_5_vl_7b_svg_rlrf",
-    "trainer.n_gpus_per_node": 8,
+    "config": "env/svg/config_svg_rlrf.yaml",
+    "worker": {"actor": {"model": {"model_path": "Qwen/Qwen2.5-VL-7B-Instruct"}}},
+    "trainer": {
+        "experiment_name": "qwen2_5_vl_7b_svg_rlrf",
+        "n_gpus_per_node": 8,
+    },
 }
 
 
