@@ -18,6 +18,15 @@ import tempfile
 
 from dreamsim import dreamsim
 
+REWARD_WEIGHTS = {
+    "format": 1.0,
+    "length": 1.0,
+    "l2": 1.0,
+    "l2_canny": 1.0,
+    "dreamsim": 1.0,
+    "dreamsim_canny": 1.0,
+}
+
 
 def normalize_image(x: torch.Tensor) -> torch.Tensor:
     """Normalize image tensor to zero mean and unit variance."""
@@ -308,10 +317,10 @@ def format_reward(predict: str) -> float:
     return 1.0 if format_match else 0.0
 
 
-def extract_svg_text(full_response: str) -> str:
+def extract_svg_text(full_response: str) -> str | None:
     pattern = re.compile(r"<svg.*?</svg>", re.DOTALL)
     match = re.search(pattern, full_response)
-    return match.group(0).strip() if match else ""
+    return match.group(0).strip() if match else None
 
 
 # TODO: support unloading the weights so we can use GPU / not take up vram
@@ -346,18 +355,36 @@ class PreprocessedResponse:
     svg_im_gt: PILImage.Image
 
 
-def format_svg(thinking: str = "", svg: str = "") -> str:
+def expected_response(
+    thinking: str = "", svg: str = "", add_line_breaks: bool = False
+) -> str:
     if svg == "":
         raise ValueError("SVG cannot be empty")
-    return f"<think>{thinking}</think>\n<answer>{svg}</answer>"
+    # we don't really care about a bit of whitespace, so test that we don't penalize it harshly
+    sp = "\n" if add_line_breaks else ""
+    return f"{sp}<think>{thinking}</think>{sp}<answer>{svg}</answer>{sp}"
 
 
-def svg_env(response_str: str, svg_gt: str) -> PreprocessedResponse:
+def clip(x: float, min_val: float, max_val: float) -> float:
+    return max(min(x, max_val), min_val)
+
+
+def l2_reward(l2_distance: float) -> float:
+    return clip(1.0 - l2_distance, -1.0, 1.0)
+
+
+def dreamsim_reward(dreamsim: float) -> float:
+    return 1.0 - 2.0 * dreamsim
+
+
+def svg_env(response_str: str, svg_gt: str) -> PreprocessedResponse | None:
     """
     Turns a response and ground truth svg (just the content within <answer> tags) into rasterized images for comparison.
     Also computes the format and length rewards.
     """
     svg = extract_svg_text(response_str)
+    if svg is None:
+        return None
     svg_im_bytes = rasterize_svg(svg)
     svg_im = PILImage.open(io.BytesIO(svg_im_bytes))
     svg_gt_bytes = rasterize_svg(svg_gt)
@@ -375,86 +402,194 @@ def reward_from_distance(distance: float) -> float:
     return 1.0 - distance
 
 
+@dataclass
+class SVGRewards:
+    format: float
+    length: float
+    l2: float
+    l2_canny: float
+    dreamsim: float
+    dreamsim_canny: float
+    overall: float
+
+
 def compute_rewards(
     p: PreprocessedResponse, image_scores: ImageComparisonResult | None = None
-) -> dict[str, float]:
+) -> SVGRewards:
     try:
-        format_score = format_reward(p.response_str)
-        length_score = length_reward(len(p.response_str), len(format_svg(svg=p.svg)))
+        format_r = format_reward(p.response_str)
+        length_r = length_reward(len(p.response_str), len(expected_response(svg=p.svg)))
     except Exception as e:
         print(f"Error in image comparison: {e}")
         image_scores = None
 
-    reward_weights = {
-        "format": 1.0,
-        "length": 1.0,
-        "l2": 1.0,
-        "l2_canny": 1.0,
-        "dreamsim": 1.0,
-        "dreamsim_canny": 1.0,
-    }
+    weight_sum = sum(REWARD_WEIGHTS.values())
 
+    BAD = float("-inf")
     # Build scores dict with only available metrics
-    scores_dict = {
-        "format": format_score,
-        "length": length_score,
+    rewards = {
+        "format": format_r,
+        "length": length_r,
+        # penalize hard if we can't render the image
+        "l2": BAD,
+        "l2_canny": BAD,
+        "dreamsim": BAD,
+        "dreamsim_canny": BAD,
     }
 
     if image_scores is not None:
-        scores_dict.update(
+        rewards.update(
             {
-                "l2": image_scores.l2,
-                "l2_canny": image_scores.l2_canny,
-                "dreamsim": image_scores.dreamsim,
-                "dreamsim_canny": image_scores.dreamsim_canny,
+                "l2": l2_reward(image_scores.l2),
+                "l2_canny": l2_reward(image_scores.l2_canny),
+                "dreamsim": dreamsim_reward(image_scores.dreamsim),
+                "dreamsim_canny": dreamsim_reward(image_scores.dreamsim_canny),
             }
         )
 
-    # Apply weights to available scores
-    result = {k: v * reward_weights[k] for k, v in scores_dict.items()}
+    rewards["overall"] = sum(rewards.values()) / weight_sum
 
-    w_valid = sum(reward_weights[k] for k in scores_dict.keys())
-    result["overall"] = (
-        sum(v * reward_weights[k] for k, v in scores_dict.items()) / w_valid
-    )
-
-    return result
+    return SVGRewards(**rewards)
 
 
-def render_and_compute_rewards(response_str: str, svg_gt: str) -> dict[str, float]:
-    p = svg_env(response_str, svg_gt)
-    return compute_rewards(p)
-
-
-if __name__ == "__main__":
-    gt = """
-<svg width='512' height='512'><circle cx='256' cy='256' r='192' stroke='black' stroke-width='3' fill='red' /></svg>
-"""
-
-    # radius differs by 3
-    response = """\
-<think>
-I think this is just a circle, so it should be easy to generate.
-</think>
-<answer>
-<svg width='512' height='512'><circle cx='256' cy='256' r='195' stroke='black' stroke-width='3' fill='red' /></svg>
-</answer>\
-"""
-    p = svg_env(response, gt)
-    im = image_comparator.compare_images(p.svg_im, p.svg_im_gt)
-
-    tempdir = tempfile.mkdtemp()
-    print(f"Writing comparison images to: {tempdir}")
+def write_debug_images(
+    p: PreprocessedResponse,
+    im: ImageComparisonResult,
+    rewards: SVGRewards,
+    tempdir: str,
+    markdown=True,
+    markdown_title: str | None = "Image comparison",
+    log=False,
+):
     images = {
         "response": (p.svg_im, "res.png"),
         "ground truth": (p.svg_im_gt, "gt.png"),
         "response canny": (im.canny_im, "res-canny.png"),
         "ground truth canny": (im.canny_im_ref, "gt-canny.png"),
     }
-
     for name, (image, filename) in images.items():
         dest = f"{tempdir}/{filename}"
         image.save(dest, format="PNG")
-        print(f"Saved {name} to {dest}")
-    scores = compute_rewards(p, im)
-    print("\n".join([f"{k}: {v:.3f}" for k, v in scores.items()]))
+        if log and not markdown:
+            print(f"Saved {name} to {dest}")
+    if markdown:
+        with open(f"{tempdir}/images.md", "w") as f:
+            f.write(f"# {markdown_title}\n")
+            f.write("\n")
+            f.write("## Rewards\n")
+            f.write("| Metric | Value |\n")
+            f.write("|--------|-------|\n")
+            for key, value in rewards.__dict__.items():
+                f.write(f"| {key.replace('_', ' ').title()} | {value:.3f} |\n")
+            f.write("\n\n")
+            f.write("## Images\n")
+            for name, (image, filename) in images.items():
+                f.write(f"{name}\n")
+                f.write(f"![{name}]({filename})\n")
+                f.write("\n")
+        print(f"Wrote {tempdir}/images.md")
+
+
+def render_and_compute_rewards(response_str: str, svg_gt: str) -> SVGRewards | None:
+    p = svg_env(response_str, svg_gt)
+    image_scores = None
+    if p is not None:
+        image_scores = image_comparator.compare_images(p.svg_im, p.svg_im_gt)
+    return compute_rewards(p, image_scores)
+
+
+if __name__ == "__main__":
+
+    def circle_svg(r: float) -> str:
+        return f"<svg width='512' height='512'><circle cx='256' cy='256' r='{r:.0f}' stroke='black' stroke-width='3' fill='red' /></svg>"
+
+    def random_path_svg(n: int) -> str:
+        p = torch.rand(n, 2) * 512
+        p = p.tolist()
+        p = [f"{x:.0f} {y:.0f}" for x, y in p]
+        p = " ".join(p)
+        return f"<svg width='512' height='512'><path d='M 256 256 L {p}' stroke='black' stroke-width='3' fill='none' /></svg>"
+
+    # Test case 1: Identical circles
+    response = expected_response(
+        thinking="I think this is just a circle, so it should be easy to generate.",
+        svg=circle_svg(200),
+        add_line_breaks=True,
+    )
+    p = svg_env(response, circle_svg(200))
+    im = image_comparator.compare_images(p.svg_im, p.svg_im_gt)
+
+    tempdir = tempfile.mkdtemp()
+    thinking = "I think this is just a circle, so it should be easy to generate."
+    test_cases = [
+        (
+            "Identical circles",
+            expected_response(
+                thinking=thinking,
+                svg=circle_svg(200),
+                add_line_breaks=True,
+            ),
+            circle_svg(200),
+        ),
+        (
+            "Slightly different circles",
+            expected_response(
+                thinking=thinking,
+                svg=circle_svg(180),
+                add_line_breaks=True,
+            ),
+            circle_svg(200),
+        ),
+        (
+            "Very different circles",
+            expected_response(
+                thinking=thinking,
+                svg=circle_svg(100),
+                add_line_breaks=True,
+            ),
+            circle_svg(200),
+        ),
+        (
+            "Missing thinking tags",
+            f"<answer>{circle_svg(200)}</answer>",
+            circle_svg(200),
+        ),
+        (
+            "Can't parse svg",
+            "<answer>I don't know how to do this</answer>",
+            circle_svg(200),
+        ),
+        (
+            "Random path",
+            expected_response(
+                thinking=thinking,
+                svg=random_path_svg(100),
+                add_line_breaks=True,
+            ),
+            random_path_svg(100),
+        ),
+    ]
+
+    for idx, (description, response, svg_gt) in enumerate(test_cases, 1):
+        print("-" * 80)
+        print(f"Case {idx} - {description}:")
+        p = svg_env(response, svg_gt)
+        if p is None:
+            print("  !Failed to parse SVG!")
+            print(f"  Response: {response}")
+            print(f"  SVG GT: {svg_gt}")
+            continue
+        im = image_comparator.compare_images(p.svg_im, p.svg_im_gt)
+        tempdir = tempfile.mkdtemp()
+        print(f"Writing comparison images to: {tempdir}")
+        rewards = compute_rewards(p, im)
+        write_debug_images(
+            p,
+            im,
+            rewards,
+            tempdir,
+            markdown=True,
+            markdown_title=f"Case {idx} - {description}",
+            log=True,
+        )
+        print("\n".join(f"{k}: {v:.3f}" for k, v in rewards.__dict__.items()))
