@@ -324,6 +324,9 @@ def extract_svg_text(full_response: str) -> str | None:
     return match.group(0).strip() if match else None
 
 
+image_comparator: ImageComparator | None = None
+
+
 # TODO: support unloading the weights so we can use GPU / not take up vram
 def get_image_comparator() -> ImageComparator:
     global image_comparator
