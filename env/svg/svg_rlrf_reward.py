@@ -273,27 +273,51 @@ def get_svg_size(tree: cairosvg.parser.Tree) -> tuple[int, int]:
     return float(width), float(height)
 
 
+def compute_svg_raster_scale(
+    width: float, height: float, min_target: int = 512, max_target: int = 1536
+) -> tuple[float, int, int]:
+    """
+    Compute the scale and output size for rasterizing an SVG such that:
+    - The smallest side is at least min_target px
+    - The largest side is at most max_target px
+    - Aspect ratio is preserved
+    Returns: (scale, output_width, output_height)
+    """
+    # Compute scale factors for both constraints
+    scale_min = min_target / min(width, height)
+    scale_max = max_target / max(width, height)
+
+    # The scale must be at least scale_min, but not so large that the largest side exceeds max_target
+    scale = max(scale_min, 1.0)
+    if max(width, height) * scale > max_target:
+        scale = scale_max
+
+    output_width = int(round(width * scale))
+    output_height = int(round(height * scale))
+    return scale, output_width, output_height
+
+
 def rasterize_svg(
-    svg_content: str, width: float | None = None, height: float | None = None
+    svg_content: str, min_target: int = 512, max_target: int = 1536
 ) -> bytes:
-    """Rasterize SVG content to PNG image bytes using CairoSVG."""
+    """Rasterize SVG content to PNG image bytes using CairoSVG.
+
+    The output image will have its smallest side at least min_target,
+    and its longest side at most max_target, preserving aspect ratio.
+    """
     tree = cairosvg.parser.Tree(bytestring=svg_content.encode("utf-8"))
-    # get the width and height from the tree
-    if width is None or height is None:
-        width, height = get_svg_size(tree)
-    else:
-        width = float(width)
-        height = float(height)
+    # Get the intrinsic width and height from the SVG
+    width, height = get_svg_size(tree)
+
+    # Compute scale and output size using the factored-out function
+    scale, output_width, output_height = compute_svg_raster_scale(
+        width, height, min_target=min_target, max_target=max_target
+    )
 
     output = io.BytesIO()
     dpi = 96
     parent_width = width
     parent_height = height
-    scale = 1
-    output_width = width
-    output_height = height
-    # The LLM does not support transparent backgrounds, so to avoid confusion,
-    # we use a white background.
     background_color = "white"
     instance = cairosvg.surface.PNGSurface(
         tree,

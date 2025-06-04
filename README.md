@@ -20,7 +20,8 @@ Implementation of SVG RLRF paper (Im2SVG):
   - [ ] C.3: Dynamic Max Length
 - [x] Dataset
    - [x] Optimize SVGs, quantize
-   - [ ] Remove blank images
+   - [x] Remove blank images
+   - [x] Always rasterize to 512 smallest side, 1536 largest side
    - [ ] SVG-Stack-Hard Test Set
      - [ ] filter out broken SVGs, white-background SVGs, and samples with low color entropy
      - [ ] only SVGs with at least 500 tokens
@@ -34,7 +35,7 @@ Further ideas Im2SVG:
 - [ ] Test out data generation of easy examples instead of fine-tuning for bootstrapping
 - [ ] Datasets 
   - [ ] https://huggingface.co/OmniSVG
-  
+
 Usage:
 ```sh
 modal run --detach run_easyr1_modal.py::train_model_easyr1 --config svg
