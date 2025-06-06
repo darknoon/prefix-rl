@@ -50,14 +50,21 @@ def load_dataset_split(
     return split
 
 
+MINUTES = 60
+HOURS = 60 * MINUTES
+
+
 # run this remotely so we can cache the dataset split on the modal volume before we spawn workers
 @app.function(
     image=image,
     volumes=volumes,
+    secrets=[modal.Secret.from_name("huggingface-write")],
     max_containers=1,
+    timeout=4 * HOURS,
 )
 def build_dataset(
     input_dataset_name: str = "starvector/svg-stack",
+    output_dataset_name: str = "darknoon/svg-stack-filtered",
     tokenizer_name: str = "Qwen/Qwen2.5-VL-7B-Instruct",
     chunk_size: int = 10_000,
     test_split_ratio: float = 0.05,
@@ -130,6 +137,8 @@ def build_dataset(
     print(f"Saving final dataset to {output_path}")
     print(f"train: {train.num_rows}, test: {test.num_rows}, val: {val.num_rows}")
     dataset_processed.save_to_disk(output_path)
+    print(f"Uploading final dataset to {output_dataset_name}")
+    dataset_processed.push_to_hub(output_dataset_name)
     print("Done!")
     return dataset_processed
 
@@ -138,7 +147,8 @@ def build_dataset(
     cpu=8,
     image=image,
     volumes=volumes,
-    max_containers=8,
+    max_containers=64,
+    timeout=30 * MINUTES,
 )
 def process_dataset_chunk(
     range_start: int,
