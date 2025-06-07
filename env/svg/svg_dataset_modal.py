@@ -75,25 +75,49 @@ def build_dataset(
         tokenizer_name: str,
         chunk_size: int,
     ):
-        split = load_dataset_split(input_dataset_name, split_name, test_split_ratio)
+        output_path = f"/root/svg-dataset-prep/outputs/{split_name}/combined/"
+        if os.path.exists(output_path):
+            print(
+                f"SPLIT ALREADY DONE: Output path {output_path} already exists, skipping!"
+            )
+            return load_from_disk(dataset_path=output_path)
+
+        split = load_dataset_split(
+            input_dataset_name, split_name, test_split_ratio=test_split_ratio
+        )
         num_rows = len(split)
+        # close file handles
+        split.close()
+        del split
         print(f"Dataset has {num_rows} rows")
 
         starts = range(0, num_rows, chunk_size)
         ends = list(range(chunk_size, num_rows, chunk_size)) + [num_rows]
         shard_paths = []
-        for shard in process_dataset_chunk.map(
-            starts,
-            ends,
-            kwargs={
-                "input_dataset_name": input_dataset_name,
-                "split_name": split_name,
-                "test_split_ratio": test_split_ratio,
-                "tokenizer_name": tokenizer_name,
-            },
+        failed_shards = []
+        for shard_idx, shard_path in enumerate(
+            process_dataset_chunk.map(
+                starts,
+                ends,
+                kwargs={
+                    "input_dataset_name": input_dataset_name,
+                    "split_name": split_name,
+                    "test_split_ratio": test_split_ratio,
+                    "tokenizer_name": tokenizer_name,
+                },
+            )
         ):
-            print(f"SHARD processed and written to: {shard}")
-            shard_paths.append(shard)
+            if shard_path is not None:
+                print(f"SHARD processed and written to: {shard_path}")
+                shard_paths.append(shard_path)
+            else:
+                print(
+                    f"WARNING: Skipping empty shard {shard_idx} ie ({shard_idx * chunk_size} to {(shard_idx + 1) * chunk_size - 1} of {num_rows})"
+                )
+                failed_shards.append(shard_idx)
+
+        if len(shard_paths) == 0:
+            raise ValueError(f"All shards were empty for {split_name} split!")
 
         print("Reloading svg-dataset-prep volume to get new chunks")
         svg_dataset_vol.reload()
@@ -102,7 +126,6 @@ def build_dataset(
         print(f"Concatenating {len(shards)} shards")
         split = concatenate_datasets(shards)
         print(f"Concatenated {len(split)} rows: {split}")
-        output_path = f"/root/svg-dataset-prep/outputs/{split_name}/"
         split.save_to_disk(output_path)
         print(f"Saved completed {split_name} to {output_path}")
         return split
@@ -196,6 +219,14 @@ def process_dataset_chunk(
         tokenizer_name=tokenizer_name,
         num_proc=8,
     )
+
+    # Check if we have any data left after filtering
+    if len(shard) == 0:
+        print(
+            f"WARNING: All examples were filtered out in chunk {range_start}-{range_end}"
+        )
+        return None  # Return None to indicate this chunk should be skipped
+
     shard.save_to_disk(outputs_path)
 
     print(
@@ -211,7 +242,7 @@ def process_dataset_chunk(
 )
 def cleanup_volume():
     print("Cleaning up volume")
-    svg_dataset_vol.remove_file("/inputs/", recursive=True)
+    # svg_dataset_vol.remove_file("/inputs/", recursive=True)
 
 
 @app.local_entrypoint()
