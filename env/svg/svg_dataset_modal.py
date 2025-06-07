@@ -66,13 +66,13 @@ def build_dataset(
         split_name: str,
         tokenizer_name: str,
         chunk_size: int,
-    ):
+    ) -> str:
         output_path = f"/root/svg-dataset-prep/outputs/{split_name}/combined/"
         if os.path.exists(output_path):
             print(
                 f"SPLIT ALREADY DONE: Output path {output_path} already exists, skipping!"
             )
-            return load_from_disk(dataset_path=output_path)
+            return output_path
 
         split_query = get_split_query(split_name, test_split_ratio)
         # using the context manager here will close file handles once done
@@ -165,7 +165,7 @@ def concat_shards(
     image=image,
     volumes=volumes,
     secrets=[modal.Secret.from_name("huggingface-write")],
-    timeout=10 * MINUTES,
+    timeout=90 * MINUTES,
 )
 def merge_and_push_to_hub(
     train_path: str,
@@ -188,7 +188,10 @@ def merge_and_push_to_hub(
     )
     print(f"Saving final dataset to {output_path}")
     print(f"train: {train.num_rows}, test: {test.num_rows}, val: {val.num_rows}")
-    dataset.save_to_disk(output_path)
+    if not os.path.exists(output_path):
+        dataset.save_to_disk(output_path)
+    else:
+        print(f"Already exists at {output_path}, skipping!")
     print(f"Uploading final dataset to HF as {output_dataset_name}")
     dataset.push_to_hub(output_dataset_name)
 
