@@ -1,6 +1,6 @@
 data:
-  train_files: MrOvkill/svg-stack-labeled@train
-  val_files: MrOvkill/svg-stack-labeled@test
+  train_files: darknoon/svg-stack-filtered@train
+  val_files: darknoon/svg-stack-filtered@val
   # prompt_key: problem
   answer_key: svg
   image_key: image

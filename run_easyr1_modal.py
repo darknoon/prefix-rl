@@ -45,10 +45,10 @@ default_args = {
 }
 
 args_svg_rlrf = {
-    "config": "env/svg/config_svg_rlrf.yaml",
-    "worker": {"actor": {"model": {"model_path": "Qwen/Qwen2.5-VL-7B-Instruct"}}},
+    "config": "env/svg/config_svg_rlrf_3b.yaml",
+    "worker": {"actor": {"model": {"model_path": "Qwen/Qwen2.5-VL-3B-Instruct"}}},
     "trainer": {
-        "experiment_name": "qwen2_5_vl_7b_svg_rlrf",
+        "experiment_name": "qwen2_5_vl_3b_svg_rlrf",
         "n_gpus_per_node": 8,
     },
 }
