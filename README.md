@@ -36,7 +36,14 @@ Further ideas Im2SVG:
 - [ ] Datasets 
   - [ ] https://huggingface.co/OmniSVG
 
-Usage:
+## Usage:
+
+### SFT
+```sh
+modal run --detach run_sft_modal.py
+```
+
+### RL fine-tuning
 ```sh
 modal run --detach run_easyr1_modal.py::train_model_easyr1 --config svg
 ```

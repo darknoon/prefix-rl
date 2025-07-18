@@ -1,0 +1,15 @@
+{
+  "darknoon/svg-stack-filtered": {
+    "hf_hub_url": "darknoon/svg-stack-filtered",
+    "columns": {
+      "prompt": "prompt",
+      "response": "completion",
+      "images": "image"
+    },
+    "tags": {
+      "language": "en",
+      "task": "vision-to-code",
+      "size": "1.4M"
+    }
+  }
+} 

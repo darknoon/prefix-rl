@@ -5,6 +5,7 @@ from datasets import (
     load_from_disk,
     DatasetDict,
     concatenate_datasets,
+    Dataset,
 )
 import os
 
@@ -161,6 +162,23 @@ def concat_shards(
     return output_path
 
 
+def add_prompt(svg, width, height):
+    def fmt(x: float, max_digits: int = 2) -> str:
+        return f"{x:.{max_digits}f}".rstrip("0").rstrip(".")
+
+    return {
+        "prompt": f"Please recreate this image <image> as exactly as possible as an SVG of width {fmt(width)} and height {fmt(height)}.",
+    }
+
+
+def add_prompt_to_dataset(dataset: Dataset, num_proc: None):
+    return dataset.map(
+        add_prompt, input_columns=["Svg", "width", "height"], num_proc=num_proc
+    )
+
+
+# due to a mixup where I didn't add the prompts (but LLama-Factory really wants them unless you want to edit the code, I did this as a backfill)
+# modal run env/svg/svg_dataset_modal.py::merge_and_push_to_hub --train-path /root/svg-dataset-prep/outputs/train/combined/ --test-path /root/svg-dataset-prep/outputs/test/combined/ --val-path /root/svg-dataset-prep/outputs/val/combined/ --output-path /root/svg-dataset-prep/final/ --output-dataset-name darknoon/svg-stack-filtered --force
 @app.function(
     image=image,
     volumes=volumes,
@@ -173,6 +191,7 @@ def merge_and_push_to_hub(
     val_path: str,
     output_path: str,
     output_dataset_name: str,
+    force: bool = False,
 ):
     print(f"Loading train split from {train_path}")
     train = load_from_disk(train_path)
@@ -181,14 +200,23 @@ def merge_and_push_to_hub(
     print(f"Loading val split from {val_path}")
     val = load_from_disk(val_path)
     print(f"train: {train.num_rows}, test: {test.num_rows}, val: {val.num_rows}")
+
     dataset = DatasetDict(
         train=train,
         test=test,
         val=val,
     )
+
+    print("Formatting dataset into prompt/completion format…")
+    dataset = dataset.map(
+        add_prompt,
+        input_columns=["Svg", "width", "height"],
+        num_proc=os.cpu_count() or 4,
+    )
+
     print(f"Saving final dataset to {output_path}")
     print(f"train: {train.num_rows}, test: {test.num_rows}, val: {val.num_rows}")
-    if not os.path.exists(output_path):
+    if not os.path.exists(output_path) or force:
         dataset.save_to_disk(output_path)
     else:
         print(f"Already exists at {output_path}, skipping!")
