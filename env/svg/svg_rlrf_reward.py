@@ -15,6 +15,8 @@ import numpy as np
 import torchvision.transforms as T
 import os
 import tempfile
+import wandb
+from typing import Optional, Dict, Any, List
 
 from dreamsim import dreamsim
 
@@ -528,6 +530,58 @@ def render_and_compute_rewards(response_str: str, svg_gt: str) -> SVGRewards | N
     if p is not None:
         image_scores = get_image_comparator().compare_images(p.svg_im, p.svg_im_gt)
     return compute_rewards(p, image_scores)
+
+
+def evaluate_and_log_to_wandb(
+    response_str: str, svg_gt: str, step: Optional[int] = None, prefix: str = "eval"
+) -> Optional[SVGRewards]:
+    """
+    Evaluate the generated SVG response against the ground truth, log images and metrics to wandb.
+    Args:
+        response_str: The model's response string (should contain <svg>...)</svg>).
+        svg_gt: The ground truth SVG string.
+        step: Optional step/global_step for wandb logging.
+        prefix: Optional prefix for wandb keys.
+    Returns:
+        SVGRewards or None if evaluation failed.
+    """
+    p = svg_env(response_str, svg_gt)
+    if p is None:
+        print("Failed to parse SVG from response.")
+        return None
+    image_scores = get_image_comparator().compare_images(p.svg_im, p.svg_im_gt)
+    rewards = compute_rewards(p, image_scores)
+
+    # Convert images to wandb.Image
+    images = {}
+    if image_scores is not None:
+        images = {
+            f"{prefix}/response": wandb.Image(p.svg_im, caption="Response SVG"),
+            f"{prefix}/ground_truth": wandb.Image(
+                p.svg_im_gt, caption="Ground Truth SVG"
+            ),
+            f"{prefix}/response_canny": wandb.Image(
+                image_scores.canny_im, caption="Response Canny"
+            ),
+            f"{prefix}/ground_truth_canny": wandb.Image(
+                image_scores.canny_im_ref, caption="Ground Truth Canny"
+            ),
+        }
+    else:
+        images = {
+            f"{prefix}/response": wandb.Image(p.svg_im, caption="Response SVG"),
+            f"{prefix}/ground_truth": wandb.Image(
+                p.svg_im_gt, caption="Ground Truth SVG"
+            ),
+        }
+
+    # Prepare metrics for wandb
+    metrics = {f"{prefix}/{k}": float(v) for k, v in rewards.__dict__.items()}
+    if step is not None:
+        wandb.log({**metrics, **images}, step=step)
+    else:
+        wandb.log({**metrics, **images})
+    return rewards
 
 
 if __name__ == "__main__":

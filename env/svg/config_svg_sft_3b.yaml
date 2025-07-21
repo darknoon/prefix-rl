@@ -17,9 +17,10 @@ deepspeed: examples/deepspeed/ds_z3_config.json
 dataset_dir: env/svg
 dataset: darknoon/svg-stack-filtered
 template: qwen2_vl
-cutoff_len: 30000
+cutoff_len: 4000
 max_samples: 100000
-overwrite_cache: true
+# This disabled the hf dataset cache, which causes training to take a long time to get started
+# overwrite_cache: true
 preprocessing_num_workers: 16
 dataloader_num_workers: 4
 
