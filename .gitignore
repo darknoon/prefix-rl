@@ -1,3 +1,6 @@
 *.pyc
 models/
 .DS_Store
+eval/
+
+.env
