@@ -1,10 +1,9 @@
 # Copyright 2025 Andrew Pouliot
 # Based on https://arxiv.org/pdf/2505.20793
 
-
 import re
-import cairosvg.parser, cairosvg.surface
-from cairosvg import svg2png
+import cairosvg.parser
+import cairosvg.surface
 
 from dataclasses import dataclass
 import torch
@@ -16,7 +15,10 @@ import torchvision.transforms as T
 import os
 import tempfile
 import wandb
-from typing import Optional, Dict, Any, List
+from pathlib import Path
+from typing import TypedDict, Optional, Literal
+import logging
+import traceback
 
 from dreamsim import dreamsim
 
@@ -135,6 +137,9 @@ def canny(
     )
     edges_blurred = final_blur(edges)
 
+    assert edges_blurred.ndim == 4, (
+        f"Canny should return 4D tensor [B,C,H,W], got {edges_blurred.ndim}D: {edges_blurred.shape}"
+    )
     return edges_blurred
 
 
@@ -166,6 +171,9 @@ def l2(x: torch.Tensor, y: torch.Tensor) -> float:
     return torch.norm(x - y) / np.sqrt(x.numel())
 
 
+logger = logging.getLogger(__name__)
+
+
 class ImageComparator:
     def __init__(
         self,
@@ -173,16 +181,16 @@ class ImageComparator:
         dreamsim_cache_dir: str = os.environ.get("DREAMSIM_CACHE_DIR", "./models"),
     ):
         self.device = device
-        print("Loading DreamSim model (from dreamsim library)...")
+        logger.info("Loading DreamSim model (from dreamsim library)...")
         try:
             self.dreamsim_model, self.dreamsim_preprocess = dreamsim(
                 pretrained=True, device=self.device, cache_dir=dreamsim_cache_dir
             )
             self.dreamsim_model.eval()
-            print("DreamSim model and preprocessor loaded successfully.")
+            logger.info("DreamSim model and preprocessor loaded successfully.")
         except Exception as e:
-            print(f"Failed to load DreamSim model from library: {e}")
-            print(
+            logger.error(f"Failed to load DreamSim model from library: {e}")
+            logger.error(
                 "Please ensure the 'dreamsim' library is installed and torch.hub caching is working."
             )
             raise
@@ -216,25 +224,47 @@ class ImageComparator:
             # 2. L2 on Canny edge maps
             edge_map = canny(tensor, self.device)
             edge_map_ref = canny(tensor_ref, self.device)
+            assert edge_map.shape == edge_map_ref.shape, (
+                f"Edge maps shape mismatch: {edge_map.shape} vs {edge_map_ref.shape}"
+            )
             l2_canny = l2(edge_map, edge_map_ref)
 
             # 3. DreamSim
-            dreamsim_distance = float(
-                self.dreamsim_model(
-                    self.dreamsim_preprocess(im),
-                    self.dreamsim_preprocess(im_ref),
+            try:
+                processed_im = self.dreamsim_preprocess(im)
+                processed_im_ref = self.dreamsim_preprocess(im_ref)
+                logger.debug(
+                    f"DreamSim input shapes: {processed_im.shape}, {processed_im_ref.shape}"
                 )
-            )
+                dreamsim_distance = float(
+                    self.dreamsim_model(processed_im, processed_im_ref)
+                )
+            except Exception as e:
+                logger.error(f"DreamSim failed on main images: {e}")
+                logger.error(f"Image sizes: {im.size}, {im_ref.size}")
+                logger.error(f"Image modes: {im.mode}, {im_ref.mode}")
+                raise
 
             # 4. DreamSim Canny
             pil_canny = edge_to_pil(edge_map)
             pil_canny_ref = edge_to_pil(edge_map_ref)
-            dreamsim_canny_distance = float(
-                self.dreamsim_model(
-                    self.dreamsim_preprocess(pil_canny.convert("RGB")),
-                    self.dreamsim_preprocess(pil_canny_ref.convert("RGB")),
+            try:
+                processed_canny = self.dreamsim_preprocess(pil_canny.convert("RGB"))
+                processed_canny_ref = self.dreamsim_preprocess(
+                    pil_canny_ref.convert("RGB")
                 )
-            )
+                logger.info(
+                    f"DreamSim Canny input shapes: {processed_canny.shape}, {processed_canny_ref.shape}"
+                )
+                dreamsim_canny_distance = float(
+                    self.dreamsim_model(processed_canny, processed_canny_ref)
+                )
+            except Exception as e:
+                logger.error(f"DreamSim failed on Canny images: {e}")
+                logger.error(
+                    f"Canny image: {pil_canny.size} ({pil_canny.mode}), ref: {pil_canny_ref.size} ({pil_canny_ref.mode})"
+                )
+                raise
 
             return ImageComparisonResult(
                 l2=float(l2_distance),
@@ -248,9 +278,9 @@ class ImageComparator:
         except Exception as e:
             import traceback
 
-            print(f"Error during image comparison: {e}")
-            print("Backtrace:")
-            print(traceback.format_exc())
+            logger.error(f"Error during image comparison: {e}")
+            logger.error("Backtrace:")
+            logger.error(traceback.format_exc())
             return None
 
 
@@ -447,6 +477,31 @@ class SVGRewards:
     overall: float
 
 
+class MergedResult(TypedDict):
+    id: str
+    prompt: str
+    response: str
+    svg: str
+    svg_gt: str
+    status: Literal["OK", "FAIL"]
+    error: str | None
+    # dump images if we have them - using logical names from write_debug_images_dict
+    svg_image: str  # filename for generated SVG image
+    svg_gt_image: str  # filename for ground truth SVG image
+    canny: str  # filename for generated canny image
+    canny_gt: str  # filename for ground truth canny image
+    diff: str  # filename for diff image
+    diff_canny: str  # filename for canny diff image
+    # rewards
+    reward_format: float
+    reward_length: float
+    reward_l2: float
+    reward_l2_canny: float
+    reward_dreamsim: float
+    reward_dreamsim_canny: float
+    reward_overall: float
+
+
 def compute_rewards(
     p: PreprocessedResponse, image_scores: ImageComparisonResult | None = None
 ) -> SVGRewards:
@@ -486,26 +541,75 @@ def compute_rewards(
     return SVGRewards(**rewards)
 
 
+def write_debug_images_dict(
+    p: PreprocessedResponse,
+    im: ImageComparisonResult,
+    output_dir: Path,
+    id_prefix: str = "",
+) -> dict[str, str]:
+    """
+    Write debug images to files and return a dictionary mapping logical names to filenames.
+
+    Args:
+        p: PreprocessedResponse containing the images
+        im: ImageComparisonResult containing comparison images
+        output_dir: Directory to write images to (str or Path)
+        id_prefix: Optional prefix for filenames (e.g., "001_")
+
+    Returns:
+        Dictionary mapping logical names to filenames, e.g., {"svg": "001_svg.png"}
+    """
+    from PIL import ImageChops
+
+    # Create output directory if it doesn't exist
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate diff images
+    diff = None
+    diff_canny = None
+    try:
+        diff = ImageChops.difference(p.svg_im, p.svg_im_gt)
+        diff_canny = ImageChops.difference(im.canny_im, im.canny_im_ref)
+    except Exception as e:
+        logger.error(f"Error generating diff images: {e}")
+        logger.error(traceback.format_exc())
+
+    # Define image mappings: logical_name -> (image, filename)
+    images = {
+        "svg": (p.svg_im, f"{id_prefix}svg.png"),
+        "svg_gt": (p.svg_im_gt, f"{id_prefix}svg_gt.png"),
+        "canny": (im.canny_im, f"{id_prefix}canny.png"),
+        "canny_gt": (im.canny_im_ref, f"{id_prefix}canny_gt.png"),
+        "diff": (diff, f"{id_prefix}diff.png"),
+        "diff_canny": (diff_canny, f"{id_prefix}diff_canny.png"),
+    }
+
+    # Save images and build return dictionary
+    result = {}
+    for logical_name, (image, filename) in images.items():
+        filepath = output_dir / filename
+        image.save(filepath, format="PNG")
+        result[logical_name] = filename
+
+    return result
+
+
 def write_debug_images(
     p: PreprocessedResponse,
     im: ImageComparisonResult,
     rewards: SVGRewards,
-    tempdir: str,
+    tempdir: Path,
     markdown=True,
     markdown_title: str | None = "Image comparison",
     log=False,
 ):
-    images = {
-        "response": (p.svg_im, "res.png"),
-        "ground truth": (p.svg_im_gt, "gt.png"),
-        "response canny": (im.canny_im, "res-canny.png"),
-        "ground truth canny": (im.canny_im_ref, "gt-canny.png"),
-    }
-    for name, (image, filename) in images.items():
-        dest = f"{tempdir}/{filename}"
-        image.save(dest, format="PNG")
-        if log and not markdown:
-            print(f"Saved {name} to {dest}")
+    # Use the new consolidated function
+    image_paths = write_debug_images_dict(p, im, tempdir)
+
+    if log and not markdown:
+        for logical_name, filename in image_paths.items():
+            print(f"Saved {logical_name} to {tempdir}/{filename}")
+
     if markdown:
         with open(f"{tempdir}/images.md", "w") as f:
             f.write(f"# {markdown_title}\n")
@@ -517,9 +621,9 @@ def write_debug_images(
                 f.write(f"| {key.replace('_', ' ').title()} | {value:.3f} |\n")
             f.write("\n\n")
             f.write("## Images\n")
-            for name, (image, filename) in images.items():
-                f.write(f"{name}\n")
-                f.write(f"![{name}]({filename})\n")
+            for logical_name, filename in image_paths.items():
+                f.write(f"{logical_name}\n")
+                f.write(f"![{logical_name}]({filename})\n")
                 f.write("\n")
         print(f"Wrote {tempdir}/images.md")
 

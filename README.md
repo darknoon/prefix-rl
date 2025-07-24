@@ -23,7 +23,7 @@ Implementation of SVG RLRF paper (Im2SVG):
    - [x] Remove blank images
    - [x] Always rasterize to 512 smallest side, 1536 largest side
    - [ ] SVG-Stack-Hard Test Set
-     - [ ] filter out broken SVGs, white-background SVGs, and samples with low color entropy
+     - [x] filter out broken SVGs, white-background SVGs, and samples with low color entropy
      - [ ] only SVGs with at least 500 tokens
      - [ ] cluster the remaining samples using DINO image features and perform stratified sampling to select 600 examples
 

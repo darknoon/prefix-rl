@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """
-pip install pillow
+From TRL vlm example:
 
 # Tested on 8x H100 GPUs
 accelerate launch
@@ -136,10 +136,6 @@ if __name__ == "__main__":
         trust_remote_code=model_args.trust_remote_code,
         **model_kwargs,
     )
-
-    ################
-    # Create a data collator to encode text and image pairs
-    ################
 
     ################
     # Dataset

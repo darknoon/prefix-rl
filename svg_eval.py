@@ -7,7 +7,10 @@ from env.svg.svg_rlrf_reward import (
     PreprocessedResponse,
     ImageComparisonResult,
     SVGRewards,
+    MergedResult,
+    write_debug_images_dict,
 )
+from cairosvg.parser import ParseError
 from datasets import load_dataset
 from dotenv import load_dotenv
 from PIL import Image, ImageChops
@@ -15,12 +18,16 @@ from openai import OpenAI
 import os
 from base64 import b64encode
 from io import BytesIO
-from typing import Callable, TypedDict, Optional
+from typing import Callable, TypedDict, Optional, Tuple, Any
 import argparse
 from functools import partial
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
+import concurrent.futures
+import json
+import logging
+import shutil
 
 load_dotenv()
 
@@ -98,38 +105,35 @@ def vllm_client(prompt: str, image: Image.Image, server_url: str) -> str:
 
 
 def debug_compare_md(
-    result: PreprocessedResponse,
-    image_scores: ImageComparisonResult,
+    result: Optional[PreprocessedResponse] = None,
+    image_scores: Optional[ImageComparisonResult] = None,
     id: str = "0",
-    output_dir: str = ".",
-):
-    diff = ImageChops.difference(result.svg_im, result.svg_im_gt)
-    diff_canny = ImageChops.difference(image_scores.canny_im, image_scores.canny_im_ref)
-
-    # Save ground truth and generated images to files with id prefix in output_dir
-    output_dir = Path(output_dir)
-    gt_filename = output_dir / f"{id}_gt.png"
-    gen_filename = output_dir / f"{id}_gen.png"
-    canny_im_filename = output_dir / f"{id}_canny_im.png"
-    canny_im_ref_filename = output_dir / f"{id}_canny_im_ref.png"
-    diff_filename = output_dir / f"{id}_diff.png"
-    diff_canny_filename = output_dir / f"{id}_diff_canny.png"
-
-    result.svg_im_gt.save(gt_filename)
-    result.svg_im.save(gen_filename)
-    image_scores.canny_im.save(canny_im_filename)
-    image_scores.canny_im_ref.save(canny_im_ref_filename)
-    diff.save(diff_filename)
-    diff_canny.save(diff_canny_filename)
-
+    output_dir: Path = Path("."),
+    error: Optional[str] = None,
+) -> Tuple[str, dict]:
     output = []
+    rel_paths = {}
+    if error is not None:
+        output.append("# Debug Compare (Error)\n\n")
+        output.append(f"## Error for example {id}:\n\n")
+        output.append("```")
+        output.append(f"{error}\n")
+        output.append("```")
+        return "".join(output), rel_paths
+    if result is None or image_scores is None:
+        output.append("# Debug Compare\n\n")
+        output.append(f"No result or image scores available for example {id}.\n")
+        return "".join(output), rel_paths
+
+    rel_paths = write_debug_images_dict(result, image_scores, output_dir, f"{id}_")
+
     output.append("# Debug Compare\n\n")
     output.append("## Ground Truth vs Generated Image\n\n")
     # Show images side-by-side using HTML
     output.append(
         f'<div style="display: flex; gap: 20px;">'
-        f'<div style="text-align: center;"><img src="{gt_filename.name}" style="max-width: 300px;"><br><b>Ground Truth</b></div>'
-        f'<div style="text-align: center;"><img src="{gen_filename.name}" style="max-width: 300px;"><br><b>Generated</b></div>'
+        f'<div style="text-align: center;"><img src="{rel_paths["svg_gt"]}" style="max-width: 300px;"><br><b>Ground Truth</b></div>'
+        f'<div style="text-align: center;"><img src="{rel_paths["svg"]}" style="max-width: 300px;"><br><b>Generated</b></div>'
         f"</div>\n\n"
     )
     # Add a details element with the canny images
@@ -137,20 +141,18 @@ def debug_compare_md(
         f"<details>\n"
         f"  <summary>Show Canny Edge Images</summary>\n"
         f'  <div style="display: flex; gap: 20px;">'
-        f'<div style="text-align: center;"><img src="{canny_im_ref_filename.name}" style="max-width: 300px;"><br><b>Canny GT</b></div>'
-        f'<div style="text-align: center;"><img src="{canny_im_filename.name}" style="max-width: 300px;"><br><b>Canny Generated</b></div>'
+        f'<div style="text-align: center;"><img src="{rel_paths["canny_gt"]}" style="max-width: 300px;"><br><b>Canny GT</b></div>'
+        f'<div style="text-align: center;"><img src="{rel_paths["canny"]}" style="max-width: 300px;"><br><b>Canny Generated</b></div>'
         f"</div>\n"
         f"</details>\n\n"
     )
     # Add a details element with the diff image and canny diff image side by side
-    diff_filename = f"{id}_diff.png"
-    diff_canny_filename = f"{id}_diff_canny.png"
     output.append(
         f"<details>\n"
         f"  <summary>Show Diff</summary>\n"
         f'  <div style="display: flex; gap: 20px;">'
-        f'<div style="text-align: center;"><img src="{diff_filename}" style="max-width: 300px;"><br><b>Diff</b></div>'
-        f'<div style="text-align: center;"><img src="{diff_canny_filename}" style="max-width: 300px;"><br><b>Canny Diff</b></div>'
+        f'<div style="text-align: center;"><img src="{rel_paths["diff"]}" style="max-width: 300px;"><br><b>Diff</b></div>'
+        f'<div style="text-align: center;"><img src="{rel_paths["diff_canny"]}" style="max-width: 300px;"><br><b>Canny Diff</b></div>'
         f"</div>\n"
         f"</details>\n\n"
     )
@@ -159,46 +161,78 @@ def debug_compare_md(
     output.append(f"- **l2_canny**: {image_scores.l2_canny}\n")
     output.append(f"- **dreamsim**: {image_scores.dreamsim}\n")
     output.append(f"- **dreamsim_canny**: {image_scores.dreamsim_canny}\n")
-    return "".join(output)
+    return "".join(output), rel_paths
 
 
-def eval_example(example: Example, client: Callable[[str, Image.Image], str]):
+class LLMClientException(Exception):
+    pass
+
+
+def eval_example(
+    example: Example, client: Callable[[str, Image.Image], str]
+) -> tuple[
+    SVGRewards | None,
+    ImageComparisonResult | None,
+    PreprocessedResponse | None,
+    Exception | None,
+]:
     prompt = example["prompt"]
     gt_svg = extract_svg_text(example["completion"])
-    gt_image = example["image"]
-    if gt_image is None:
-        svg_im_bytes, _, _ = rasterize_svg(gt_svg)
-        gt_image = Image.open(BytesIO(svg_im_bytes))
-    elif isinstance(gt_image, list):
-        # multiple images in a single example?
-        if len(gt_image) == 1:
-            gt_image = gt_image[0]
-        else:
-            raise ValueError(f"Expected 1 image, got {len(gt_image)}")
-
-    if not isinstance(gt_image, Image.Image):
-        raise ValueError(f"Expected Image.Image, got {type(gt_image)}")
-
-    response = client(prompt, gt_image)
-    result = svg_env(response, gt_svg)
-    if result is not None:
+    if gt_svg is None:
+        return None, None, None, ValueError("Ground truth error: No SVG found")
+    # 2. Image loading
+    try:
+        gt_image = example["image"]
+        if gt_image is None:
+            svg_im_bytes, _, _ = rasterize_svg(gt_svg)
+            gt_image = Image.open(BytesIO(svg_im_bytes))
+        if not isinstance(gt_image, Image.Image):
+            raise ValueError(f"Expected Image.Image, got {type(gt_image)}: {gt_image}")
+    except Exception as e:
+        return None, None, None, e
+    # 3. Run completions
+    try:
+        completion = client(prompt, gt_image)
+    except Exception as e:
+        return None, None, None, e
+    # 4. Parse and rasterize SVG
+    try:
+        rasterized = svg_env(completion, gt_svg)
+    except Exception as e:
+        return None, None, None, e
+    # 5. Image comparison
+    try:
         image_scores = get_image_comparator().compare_images(
-            result.svg_im, result.svg_im_gt
+            rasterized.svg_im, rasterized.svg_im_gt
         )
-        rewards = compute_rewards(result, image_scores)
-    return rewards, image_scores, result
+    except Exception as e:
+        return None, None, rasterized, e
+    # 6. Reward computation
+    try:
+        rewards = compute_rewards(rasterized, image_scores)
+    except Exception as e:
+        return None, image_scores, rasterized, e
+    # OK!
+    return rewards, image_scores, rasterized, None
 
 
 def default_prompt(image: Image.Image) -> str:
     return f"Please recreate the image as accurately as possible as an SVG of width {image.width} and height {image.height}."
 
 
-def calculate_stats(results: list[SVGRewards]) -> dict:
+class Stats(TypedDict):
+    mean: float
+    std: float
+    min: float
+    max: float
+
+
+def calculate_stats(results: list[SVGRewards]) -> dict[str, Stats]:
     if not results:
         return {}
     # Collect all reward keys
     reward_keys = ["overall", "l2", "l2_canny", "dreamsim", "dreamsim_canny"]
-    stats = {}
+    stats: dict[str, Stats] = {}
     for key in reward_keys:
         values = [getattr(r, key) for r in results]
         stats[key] = {
@@ -213,16 +247,19 @@ def calculate_stats(results: list[SVGRewards]) -> dict:
 def run_eval(
     config: DatasetConfig,
     client: Callable[[str, Image.Image], str],
+    output_dir: Path,
     num_eval_examples: int = 100,
     debug_dump: bool = False,
-    output_dir: Path | None = None,
+    num_workers: int = 1,
+    model_name: str | None = None,
 ):
+    if model_name is None:
+        raise ValueError("model_name must be provided")
+
     dataset_name = config["name"]
     split = config["split"]
     # streaming=True allows us to not load the entire dataset (which is very large)
     dataset = load_dataset(dataset_name, split=f"{split}", streaming=True)
-
-    # INSERT_YOUR_CODE
     # Take only the first num_eval_examples from the streaming dataset
     dataset = dataset.take(num_eval_examples)
     image_key = config["image_key"]
@@ -241,39 +278,117 @@ def run_eval(
         }
 
     dataset = dataset.map(process_example, remove_columns=dataset.column_names)
+    example_list = list(dataset)
+
+    # Prepare debug output directory and markdown path if needed
+    output_dir.mkdir(parents=True, exist_ok=True)
+    md_path = output_dir / "eval_debug.md"
+
+    # Setup logging to file
+    log_path = output_dir / "log.txt"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[logging.FileHandler(log_path), logging.StreamHandler()],
+    )
+    logger = logging.getLogger(__name__)
+
+    jsonl_path = output_dir / "llm_responses.jsonl"
+
+    def worker(i: int, example: Example) -> tuple[SVGRewards, str, dict]:
+        id = f"{i:05d}"
+        image_paths = {}
+        rewards, image_scores, result, exc = eval_example(example, client)
+        status = "OK" if exc is None else "FAIL"
+        error_message = None
+        if exc is not None:
+            if isinstance(exc, ParseError):
+                error_message = "SVG_PARSE"
+            else:
+                error_message = str(exc)
+        debug_md = None
+        # Write markdown and debug images if requested
+        if debug_dump:
+            debug_md, image_paths = debug_compare_md(
+                result, image_scores, id=id, output_dir=output_dir, error=error_message
+            )
+        # Try to get LLM response if possible
+        prompt = example["prompt"]
+        svg_gt = extract_svg_text(example["completion"])
+        # Build record for jsonl
+        record: MergedResult = {
+            "id": id,
+            "prompt": prompt,
+            "response": result.response_str,
+            "svg": result.svg,
+            "svg_gt": svg_gt,
+            # dump images if we have them - map logical names to field names
+            "svg_image": image_paths.get("svg", ""),
+            "svg_gt_image": image_paths.get("svg_gt", ""),
+            "canny": image_paths.get("canny", ""),
+            "canny_gt": image_paths.get("canny_gt", ""),
+            "diff": image_paths.get("diff", ""),
+            "diff_canny": image_paths.get("diff_canny", ""),
+            **{
+                (f"reward_{k}"): getattr(rewards, k, None)
+                for k in ["overall", "l2", "l2_canny", "dreamsim", "dreamsim_canny"]
+            },
+            "status": status,
+            "error": error_message,
+        }
+        return (rewards, debug_md, record)
 
     results = []
-    if debug_dump:
-        name_safe = dataset_name.replace("/", "_")
-        model_safe = (
-            client.keywords["model_name"]
-            if hasattr(client, "keywords") and "model_name" in client.keywords
-            else "model"
-        ).replace("/", "_")
-        dir_name = f"{name_safe}_{model_safe}"
-        if output_dir is None:
-            output_dir = Path("eval") / dir_name
-        if output_dir.exists():
-            import shutil
-
-            shutil.rmtree(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        md_path = output_dir / f"eval_debug_{dir_name}.md"
-        with md_path.open("w") as f:
-            for i, example in enumerate(tqdm(dataset, desc="Evaluating examples")):
-                id = f"{i:05d}"
-                rewards, image_scores, result = eval_example(example, client)
-                f.write(
-                    debug_compare_md(result, image_scores, id=id, output_dir=output_dir)
-                )
-                results.append(rewards)
-                f.flush()
-            f.write("# Total Rewards\n\n")
-            f.write(f"{calculate_stats(results)}\n")
-    else:
-        for example in tqdm(dataset, desc="Evaluating examples"):
-            rewards, image_scores, result = eval_example(example, client)
+    debug_mds = []
+    records = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = [executor.submit(worker, i, ex) for i, ex in enumerate(example_list)]
+        for fut in tqdm(
+            concurrent.futures.as_completed(futures),
+            total=len(futures),
+            desc="Evaluating examples",
+        ):
+            rewards, md, record = fut.result()
             results.append(rewards)
+            if md is not None:
+                debug_mds.append(md)
+            records.append(record)
+
+    stats = calculate_stats(results)
+    if debug_dump:
+        with md_path.open("w") as f:
+            for md in debug_mds:
+                f.write(md)
+            f.write("# Total Rewards\n\n")
+            for key, stat in stats.items():
+                mean, std, min_, max_ = (
+                    stat["mean"],
+                    stat["std"],
+                    stat["min"],
+                    stat["max"],
+                )
+                f.write(
+                    f"**{key}**: {mean:.2f} ± {std:.2f} ({min_:.2f}-{max_:.2f})\n\n"
+                )
+
+    # Write summarized stats as CSV
+    csv_path = output_dir / "stats_summary.csv"
+    with csv_path.open("w") as f:
+        f.write("model_name,reward_key,mean,std,min,max\n")
+        for key, stat in stats.items():
+            mean, std, min_, max_ = (
+                stat["mean"],
+                stat["std"],
+                stat["min"],
+                stat["max"],
+            )
+            f.write(f"{model_name},{key},{mean:.4f},{std:.4f},{min_:.4f},{max_:.4f}\n")
+
+    # Write all LLM responses and metadata to jsonl
+    with jsonl_path.open("w") as f:
+        for record in records:
+            f.write(json.dumps(record) + "\n")
+
     return results
 
 
@@ -303,7 +418,7 @@ parser.add_argument(
     "-n",
     "--num_eval_examples",
     type=int,
-    default=5,
+    default=10,
     help="Number of examples to evaluate.",
 )
 parser.add_argument(
@@ -317,7 +432,7 @@ parser.add_argument(
     "--model_name",
     type=str,
     default="gpt-4.1-mini",
-    help="Model name for OpenAI/Anthropic/Google clients. Ignored for vllm.",
+    help="Model name for OpenAI/Anthropic/Google clients. For vllm, just determines what directory to write to, you must load the correct model separately.",
 )
 parser.add_argument(
     "--vllm_endpoint",
@@ -333,6 +448,12 @@ parser.add_argument(
     type=str,
     default=None,
     help="Directory to write debug markdown and images (default: ./eval/{dataset_name}/)",
+)
+parser.add_argument(
+    "--num_workers",
+    type=int,
+    default=1,
+    help="Number of parallel workers to use for evaluation.",
 )
 
 
@@ -356,10 +477,25 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unknown client: {args.client}")
 
+    # Set output_dir to default if not provided
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        dataset_safe = dataset_config["name"].replace("/", "_")
+        model_safe = args.model_name.replace("/", "_")
+        dir_name = f"{dataset_safe}_{model_safe}"
+        output_dir = Path("eval") / dir_name
+
     rewards = run_eval(
         dataset_config,
         client_fn,
+        output_dir,
         num_eval_examples=args.num_eval_examples,
         debug_dump=args.debug_dump,
-        output_dir=args.output_dir,
+        num_workers=args.num_workers,
+        model_name=args.model_name,
+    )
+
+    print(
+        f"Output written to: {output_dir.resolve().relative_to(Path.cwd()) if not output_dir.is_absolute() else output_dir.resolve()}"
     )
