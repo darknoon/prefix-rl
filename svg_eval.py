@@ -9,22 +9,23 @@ from env.svg.svg_rlrf_reward import (
     SVGRewards,
     MergedResult,
     write_debug_images_dict,
+    MIN_REWARD,
 )
-from cairosvg.parser import ParseError
+from xml.etree.ElementTree import ParseError
 from datasets import load_dataset
 from dotenv import load_dotenv
 from PIL import Image, ImageChops
-from openai import OpenAI
+from openai import AsyncOpenAI
 import os
 from base64 import b64encode
 from io import BytesIO
-from typing import Callable, TypedDict, Optional, Tuple, Any
+from typing import Callable, TypedDict, Optional, Tuple, Any, Awaitable
 import argparse
 from functools import partial
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
-import concurrent.futures
+import asyncio
 import json
 import logging
 import shutil
@@ -86,19 +87,19 @@ def prompt_to_messages(prompt: str, image: Image.Image) -> list[dict]:
     ]
 
 
-def openai_client(
+async def openai_client(
     prompt: str, image: Image.Image, model_name: str = "gpt-4.1-mini"
 ) -> str:
-    client = OpenAI()
-    response = client.chat.completions.create(
+    client = AsyncOpenAI()
+    response = await client.chat.completions.create(
         model=model_name, messages=prompt_to_messages(prompt, image)
     )
     return response.choices[0].message.content
 
 
-def vllm_client(prompt: str, image: Image.Image, server_url: str) -> str:
-    client = OpenAI(base_url=server_url)
-    response = client.chat.completions.create(
+async def vllm_client(prompt: str, image: Image.Image, server_url: str) -> str:
+    client = AsyncOpenAI(base_url=server_url)
+    response = await client.chat.completions.create(
         model="", messages=prompt_to_messages(prompt, image)
     )
     return response.choices[0].message.content
@@ -168,8 +169,8 @@ class LLMClientException(Exception):
     pass
 
 
-def eval_example(
-    example: Example, client: Callable[[str, Image.Image], str]
+async def eval_example(
+    example: Example, client: Callable[[str, Image.Image], Awaitable[str]]
 ) -> tuple[
     SVGRewards | None,
     ImageComparisonResult | None,
@@ -192,7 +193,7 @@ def eval_example(
         return None, None, None, e
     # 3. Run completions
     try:
-        completion = client(prompt, gt_image)
+        completion = await client(prompt, gt_image)
     except Exception as e:
         return None, None, None, e
     # 4. Parse and rasterize SVG
@@ -244,9 +245,9 @@ def calculate_stats(results: list[SVGRewards]) -> dict[str, Stats]:
     return stats
 
 
-def run_eval(
+async def run_eval(
     config: DatasetConfig,
-    client: Callable[[str, Image.Image], str],
+    client: Callable[[str, Image.Image], Awaitable[str]],
     output_dir: Path,
     num_eval_examples: int = 100,
     debug_dump: bool = False,
@@ -281,6 +282,8 @@ def run_eval(
     example_list = list(dataset)
 
     # Prepare debug output directory and markdown path if needed
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     md_path = output_dir / "eval_debug.md"
 
@@ -295,10 +298,10 @@ def run_eval(
 
     jsonl_path = output_dir / "llm_responses.jsonl"
 
-    def worker(i: int, example: Example) -> tuple[SVGRewards, str, dict]:
+    async def worker(i: int, example: Example) -> tuple[SVGRewards, str, dict]:
         id = f"{i:05d}"
         image_paths = {}
-        rewards, image_scores, result, exc = eval_example(example, client)
+        rewards, image_scores, result, exc = await eval_example(example, client)
         status = "OK" if exc is None else "FAIL"
         error_message = None
         if exc is not None:
@@ -306,6 +309,18 @@ def run_eval(
                 error_message = "SVG_PARSE"
             else:
                 error_message = str(exc)
+        # Create zero rewards for failures
+        if rewards is None:
+            rewards = SVGRewards(
+                format=0.0,
+                length=0.0,
+                l2=MIN_REWARD,
+                l2_canny=MIN_REWARD,
+                dreamsim=MIN_REWARD,
+                dreamsim_canny=MIN_REWARD,
+                overall=MIN_REWARD
+            )
+        
         debug_md = None
         # Write markdown and debug images if requested
         if debug_dump:
@@ -319,8 +334,8 @@ def run_eval(
         record: MergedResult = {
             "id": id,
             "prompt": prompt,
-            "response": result.response_str,
-            "svg": result.svg,
+            "response": result.response_str if result is not None else None,
+            "svg": result.svg if result is not None else None,
             "svg_gt": svg_gt,
             # dump images if we have them - map logical names to field names
             "svg_image": image_paths.get("svg", ""),
@@ -341,20 +356,42 @@ def run_eval(
     results = []
     debug_mds = []
     records = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(worker, i, ex) for i, ex in enumerate(example_list)]
-        for fut in tqdm(
-            concurrent.futures.as_completed(futures),
-            total=len(futures),
-            desc="Evaluating examples",
-        ):
-            rewards, md, record = fut.result()
-            results.append(rewards)
-            if md is not None:
-                debug_mds.append(md)
-            records.append(record)
 
+    # Create semaphore to limit concurrent requests
+    semaphore = asyncio.Semaphore(num_workers)
+
+    async def bounded_worker(i: int, example: Example):
+        async with semaphore:
+            return await worker(i, example)
+
+    # Create tasks for all examples
+    tasks = [bounded_worker(i, ex) for i, ex in enumerate(example_list)]
+
+    # Execute tasks with progress bar
+    for task in tqdm(
+        asyncio.as_completed(tasks),
+        total=len(tasks),
+        desc="Evaluating examples",
+    ):
+        rewards, md, record = await task
+        results.append(rewards)
+        if md is not None:
+            debug_mds.append(md)
+        records.append(record)
+
+    # Calculate success rate
+    total_examples = len(results)
+    failed_examples = sum(1 for r in records if r["status"] == "FAIL")
+    success_rate = (total_examples - failed_examples) / total_examples if total_examples > 0 else 0.0
+    
     stats = calculate_stats(results)
+    stats["success_rate"] = {
+        "mean": success_rate,
+        "std": None,
+        "min": None,
+        "max": None,
+    }
+    
     if debug_dump:
         with md_path.open("w") as f:
             for md in debug_mds:
@@ -373,6 +410,8 @@ def run_eval(
 
     # Write summarized stats as CSV
     csv_path = output_dir / "stats_summary.csv"
+    def fmt(x: float | None):
+        return f"{x:.4f}" if x is not None else ""
     with csv_path.open("w") as f:
         f.write("model_name,reward_key,mean,std,min,max\n")
         for key, stat in stats.items():
@@ -382,7 +421,7 @@ def run_eval(
                 stat["min"],
                 stat["max"],
             )
-            f.write(f"{model_name},{key},{mean:.4f},{std:.4f},{min_:.4f},{max_:.4f}\n")
+            f.write(f"{model_name},{key},{fmt(mean)},{fmt(std)},{fmt(min_)},{fmt(max_)}\n")
 
     # Write all LLM responses and metadata to jsonl
     with jsonl_path.open("w") as f:
@@ -486,14 +525,16 @@ if __name__ == "__main__":
         dir_name = f"{dataset_safe}_{model_safe}"
         output_dir = Path("eval") / dir_name
 
-    rewards = run_eval(
-        dataset_config,
-        client_fn,
-        output_dir,
-        num_eval_examples=args.num_eval_examples,
-        debug_dump=args.debug_dump,
-        num_workers=args.num_workers,
-        model_name=args.model_name,
+    rewards = asyncio.run(
+        run_eval(
+            dataset_config,
+            client_fn,
+            output_dir,
+            num_eval_examples=args.num_eval_examples,
+            debug_dump=args.debug_dump,
+            num_workers=args.num_workers,
+            model_name=args.model_name,
+        )
     )
 
     print(

@@ -22,6 +22,9 @@ import traceback
 
 from dreamsim import dreamsim
 
+# Minimum reward value for failed evaluations
+MIN_REWARD = -1.0
+
 REWARD_WEIGHTS = {
     "format": 1.0,
     "length": 1.0,
@@ -514,7 +517,7 @@ def compute_rewards(
 
     weight_sum = sum(REWARD_WEIGHTS.values())
 
-    BAD = float("-inf")
+    BAD = MIN_REWARD
     # Build scores dict with only available metrics
     rewards = {
         "format": format_r,
