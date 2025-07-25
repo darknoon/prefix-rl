@@ -108,6 +108,7 @@ async def vllm_client(prompt: str, image: Image.Image, server_url: str) -> str:
 def debug_compare_md(
     result: Optional[PreprocessedResponse] = None,
     image_scores: Optional[ImageComparisonResult] = None,
+    rewards: Optional[SVGRewards] = None,
     id: str = "0",
     output_dir: Path = Path("."),
     error: Optional[str] = None,
@@ -128,8 +129,7 @@ def debug_compare_md(
 
     rel_paths = write_debug_images_dict(result, image_scores, output_dir, f"{id}_")
 
-    output.append("# Debug Compare\n\n")
-    output.append("## Ground Truth vs Generated Image\n\n")
+    output.append(f"## Example {id}\n\n")
     # Show images side-by-side using HTML
     output.append(
         f'<div style="display: flex; gap: 20px;">'
@@ -157,11 +157,36 @@ def debug_compare_md(
         f"</div>\n"
         f"</details>\n\n"
     )
-    output.append("## Image Comparison Scores\n\n")
-    output.append(f"- **l2**: {image_scores.l2}\n")
-    output.append(f"- **l2_canny**: {image_scores.l2_canny}\n")
-    output.append(f"- **dreamsim**: {image_scores.dreamsim}\n")
-    output.append(f"- **dreamsim_canny**: {image_scores.dreamsim_canny}\n")
+    output.append("### Scores\n\n")
+
+    def fmt_score(x: float | None):
+        return f"{x:.4f}" if x is not None else "N/A"
+
+    output.append("| Metric | Raw Score | Reward |\n")
+    output.append("|--------|-----------|--------|\n")
+
+    metrics = [
+        ("L2", "l2"),
+        ("L2 Canny", "l2_canny"),
+        ("DreamSim", "dreamsim"),
+        ("DreamSim Canny", "dreamsim_canny"),
+    ]
+
+    for name, key in metrics:
+        raw = fmt_score(getattr(image_scores, key, None)) if image_scores else "N/A"
+        reward = fmt_score(getattr(rewards, key, None)) if rewards else "N/A"
+        output.append(f"| {name} | {raw} | {reward} |\n")
+
+    if rewards:
+        # Length shows actual response length as raw score
+        response_length = (
+            len(result.response_str) if result and result.response_str else 0
+        )
+        output.append(f"| Format | N/A | {fmt_score(rewards.format)} |\n")
+        output.append(f"| Length | {response_length} | {fmt_score(rewards.length)} |\n")
+        output.append(f"| **Overall** | N/A | **{fmt_score(rewards.overall)}** |\n")
+
+    output.append("\n")
     return "".join(output), rel_paths
 
 
@@ -290,25 +315,51 @@ async def run_eval(
     # Setup logging to file
     log_path = output_dir / "log.txt"
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[logging.FileHandler(log_path), logging.StreamHandler()],
     )
     logger = logging.getLogger(__name__)
 
+    # Reduce noise from HTTP requests and other verbose loggers
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("PIL").setLevel(logging.WARNING)
+
+    logger.info(
+        f"Starting evaluation: {num_eval_examples} examples from {dataset_name} using {model_name} with {num_workers} workers"
+    )
+
     jsonl_path = output_dir / "llm_responses.jsonl"
 
     async def worker(i: int, example: Example) -> tuple[SVGRewards, str, dict]:
         id = f"{i:05d}"
+        logger.debug(f"Starting evaluation of example {id}")
+
         image_paths = {}
         rewards, image_scores, result, exc = await eval_example(example, client)
         status = "OK" if exc is None else "FAIL"
         error_message = None
+
         if exc is not None:
             if isinstance(exc, ParseError):
                 error_message = "SVG_PARSE"
             else:
                 error_message = str(exc)
+
+            # Log failure with completion details
+            completion_text = (
+                result.response_str if result is not None else "No completion available"
+            )
+            logger.error(f"Example {id} FAILED: {error_message}")
+            logger.error(
+                f"Example {id} completion that failed: {completion_text[:500]}{'...' if len(completion_text) > 500 else ''}"
+            )
+        else:
+            logger.debug(f"Example {id} completed successfully")
+
         # Create zero rewards for failures
         if rewards is None:
             rewards = SVGRewards(
@@ -318,15 +369,21 @@ async def run_eval(
                 l2_canny=MIN_REWARD,
                 dreamsim=MIN_REWARD,
                 dreamsim_canny=MIN_REWARD,
-                overall=MIN_REWARD
+                overall=MIN_REWARD,
             )
-        
-        debug_md = None
+
         # Write markdown and debug images if requested
         if debug_dump:
             debug_md, image_paths = debug_compare_md(
-                result, image_scores, id=id, output_dir=output_dir, error=error_message
+                result,
+                image_scores,
+                rewards,
+                id=id,
+                output_dir=output_dir,
+                error=error_message,
             )
+        else:
+            debug_md = None
         # Try to get LLM response if possible
         prompt = example["prompt"]
         svg_gt = extract_svg_text(example["completion"])
@@ -344,25 +401,40 @@ async def run_eval(
             "canny_gt": image_paths.get("canny_gt", ""),
             "diff": image_paths.get("diff", ""),
             "diff_canny": image_paths.get("diff_canny", ""),
+            # raw image scores
+            **{
+                k: getattr(image_scores, k, None) if image_scores is not None else None
+                for k in ["l2", "l2_canny", "dreamsim", "dreamsim_canny"]
+            },
+            # rewards
             **{
                 (f"reward_{k}"): getattr(rewards, k, None)
-                for k in ["overall", "l2", "l2_canny", "dreamsim", "dreamsim_canny"]
+                for k in [
+                    "format",
+                    "length",
+                    "overall",
+                    "l2",
+                    "l2_canny",
+                    "dreamsim",
+                    "dreamsim_canny",
+                ]
             },
             "status": status,
             "error": error_message,
         }
         return (rewards, debug_md, record)
 
-    results = []
-    debug_mds = []
-    records = []
+    # Use parallel arrays with same length, indexed by original order
+    results = [None] * len(example_list)
+    debug_mds = [None] * len(example_list)
+    records = [None] * len(example_list)
 
     # Create semaphore to limit concurrent requests
     semaphore = asyncio.Semaphore(num_workers)
 
     async def bounded_worker(i: int, example: Example):
         async with semaphore:
-            return await worker(i, example)
+            return i, await worker(i, example)
 
     # Create tasks for all examples
     tasks = [bounded_worker(i, ex) for i, ex in enumerate(example_list)]
@@ -373,17 +445,24 @@ async def run_eval(
         total=len(tasks),
         desc="Evaluating examples",
     ):
-        rewards, md, record = await task
-        results.append(rewards)
-        if md is not None:
-            debug_mds.append(md)
-        records.append(record)
+        i, (rewards, md, record) = await task
+        results[i] = rewards
+        debug_mds[i] = md
+        records[i] = record
 
     # Calculate success rate
     total_examples = len(results)
     failed_examples = sum(1 for r in records if r["status"] == "FAIL")
-    success_rate = (total_examples - failed_examples) / total_examples if total_examples > 0 else 0.0
-    
+    success_rate = (
+        (total_examples - failed_examples) / total_examples
+        if total_examples > 0
+        else 0.0
+    )
+
+    logger.info(
+        f"Evaluation completed: {total_examples} examples processed, {failed_examples} failed, {success_rate:.1%} success rate"
+    )
+
     stats = calculate_stats(results)
     stats["success_rate"] = {
         "mean": success_rate,
@@ -391,12 +470,27 @@ async def run_eval(
         "min": None,
         "max": None,
     }
-    
+
     if debug_dump:
         with md_path.open("w") as f:
+            # Write header with model and dataset info
+            f.write("# SVG Evaluation Results\n\n")
+            f.write(f"**Model:** {model_name}  \n")
+            f.write(f"**Dataset:** {dataset_name}  \n")
+            f.write(f"**Examples:** {num_eval_examples}  \n")
+
+            # Write individual example results in order
             for md in debug_mds:
                 f.write(md)
-            f.write("# Total Rewards\n\n")
+
+            f.write("# Summary Statistics\n\n")
+
+            def fmt_stat(x: float | None):
+                return f"{x:.2f}" if x is not None else "N/A"
+
+            f.write("| Metric | Mean | Std | Min | Max |\n")
+            f.write("|--------|------|-----|-----|-----|\n")
+
             for key, stat in stats.items():
                 mean, std, min_, max_ = (
                     stat["mean"],
@@ -405,13 +499,15 @@ async def run_eval(
                     stat["max"],
                 )
                 f.write(
-                    f"**{key}**: {mean:.2f} ± {std:.2f} ({min_:.2f}-{max_:.2f})\n\n"
+                    f"| {key} | {fmt_stat(mean)} | {fmt_stat(std)} | {fmt_stat(min_)} | {fmt_stat(max_)} |\n"
                 )
 
     # Write summarized stats as CSV
     csv_path = output_dir / "stats_summary.csv"
+
     def fmt(x: float | None):
         return f"{x:.4f}" if x is not None else ""
+
     with csv_path.open("w") as f:
         f.write("model_name,reward_key,mean,std,min,max\n")
         for key, stat in stats.items():
@@ -421,7 +517,9 @@ async def run_eval(
                 stat["min"],
                 stat["max"],
             )
-            f.write(f"{model_name},{key},{fmt(mean)},{fmt(std)},{fmt(min_)},{fmt(max_)}\n")
+            f.write(
+                f"{model_name},{key},{fmt(mean)},{fmt(std)},{fmt(min_)},{fmt(max_)}\n"
+            )
 
     # Write all LLM responses and metadata to jsonl
     with jsonl_path.open("w") as f:

@@ -236,9 +236,6 @@ class ImageComparator:
             try:
                 processed_im = self.dreamsim_preprocess(im)
                 processed_im_ref = self.dreamsim_preprocess(im_ref)
-                logger.debug(
-                    f"DreamSim input shapes: {processed_im.shape}, {processed_im_ref.shape}"
-                )
                 dreamsim_distance = float(
                     self.dreamsim_model(processed_im, processed_im_ref)
                 )
@@ -495,6 +492,11 @@ class MergedResult(TypedDict):
     canny_gt: str  # filename for ground truth canny image
     diff: str  # filename for diff image
     diff_canny: str  # filename for canny diff image
+    # raw image scores
+    score_l2: float | None
+    score_l2_canny: float | None
+    score_dreamsim: float | None
+    score_dreamsim_canny: float | None
     # rewards
     reward_format: float
     reward_length: float
