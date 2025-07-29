@@ -10,13 +10,18 @@ from env.svg.svg_rlrf_reward import (
     MergedResult,
     write_debug_images_dict,
     MIN_REWARD,
+    UsageData,
 )
 from xml.etree.ElementTree import ParseError
 from datasets import load_dataset
 from dotenv import load_dotenv
 from PIL import Image, ImageChops
 from openai import AsyncOpenAI
+import anthropic
+from google import genai
+from google.genai import types
 import os
+import httpx
 from base64 import b64encode
 from io import BytesIO
 from typing import Callable, TypedDict, Optional, Tuple, Any, Awaitable
@@ -72,6 +77,13 @@ def image_to_data_url(image: Image.Image) -> str:
     return f"data:image/png;base64,{u}"
 
 
+def image_to_base64(image: Image.Image) -> str:
+    """Helper to convert PIL Image to base64 string"""
+    with BytesIO() as buffered:
+        image.save(buffered, format="PNG")
+        return b64encode(buffered.getvalue()).decode("utf-8")
+
+
 def prompt_to_messages(prompt: str, image: Image.Image) -> list[dict]:
     return [
         {
@@ -88,21 +100,126 @@ def prompt_to_messages(prompt: str, image: Image.Image) -> list[dict]:
 
 
 async def openai_client(
-    prompt: str, image: Image.Image, model_name: str = "gpt-4.1-mini"
-) -> str:
+    prompt: str,
+    image: Image.Image,
+    model_name: str = "gpt-4.1-mini",
+    temperature: float = 1.0,
+) -> tuple[str, str | None, UsageData]:
     client = AsyncOpenAI()
     response = await client.chat.completions.create(
-        model=model_name, messages=prompt_to_messages(prompt, image)
+        model=model_name,
+        messages=prompt_to_messages(prompt, image),
+        temperature=temperature,
     )
-    return response.choices[0].message.content
+
+    usage = UsageData(
+        prompt_tokens=response.usage.prompt_tokens if response.usage else None,
+        completion_tokens=response.usage.completion_tokens if response.usage else None,
+        reasoning_tokens=None,
+        total_tokens=response.usage.total_tokens if response.usage else None,
+    )
+
+    return response.choices[0].message.content, None, usage
 
 
-async def vllm_client(prompt: str, image: Image.Image, server_url: str) -> str:
+async def openai_reasoning_client(
+    prompt: str,
+    image: Image.Image,
+    model_name: str = "o1-mini",
+    temperature: float = 0.1,
+) -> tuple[str, str | None, UsageData]:
+    """OpenAI reasoning client using Responses API to capture thinking tokens"""
+    client = AsyncOpenAI()
+    response = await client.chat.completions.create(
+        model=model_name,
+        messages=prompt_to_messages(prompt, image),
+        temperature=temperature,
+    )
+
+    content = response.choices[0].message.content or ""
+
+    # For reasoning models, check for reasoning tokens in usage
+    reasoning_tokens = None
+    if response.usage and hasattr(response.usage, "completion_tokens_details"):
+        details = response.usage.completion_tokens_details
+        if details and hasattr(details, "reasoning_tokens"):
+            reasoning_tokens = details.reasoning_tokens
+
+    usage = UsageData(
+        prompt_tokens=response.usage.prompt_tokens if response.usage else None,
+        completion_tokens=response.usage.completion_tokens if response.usage else None,
+        reasoning_tokens=reasoning_tokens,
+        total_tokens=response.usage.total_tokens if response.usage else None,
+    )
+
+    return content, None, usage
+
+
+import asyncio
+
+
+def health_check_url(server_url: str) -> str:
+    base_url = server_url.rstrip("/")
+    if base_url.endswith("/v1"):
+        base_url = base_url[:-3]  # Remove /v1
+    return f"{base_url}/health"
+
+
+async def check_vllm_server_health(server_url: str) -> bool:
+    """Check if the vLLM server is online and healthy. Give a few minutes for the server to start."""
+
+    health_url = health_check_url(server_url)
+    max_attempts = 12  # Try for up to 2 minutes (12 * 10s)
+    timeout = 10.0
+    delay = 1
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.get(health_url)
+                if response.status_code == 200:
+                    print(f"✅ vLLM server health check passed: {health_url}")
+                    return True
+                else:
+                    print(
+                        f"❌ Health check failed with status {response.status_code}: {response.text}"
+                    )
+        except Exception as e:
+            print(f"Health check attempt {attempt} failed with error: {e}")
+
+        if attempt < max_attempts:
+            print(
+                f"Waiting {delay} seconds before retrying health check (attempt {attempt + 1}/{max_attempts})..."
+            )
+            await asyncio.sleep(delay)
+        else:
+            print("❌ vLLM server did not become healthy after several attempts.")
+
+    return False
+
+
+async def vllm_client(
+    prompt: str,
+    image: Image.Image,
+    server_url: str,
+    model_name: str = "Qwen/Qwen2.5-VL-3B-Instruct",
+    temperature: float = 1.0,
+) -> tuple[str, str | None, UsageData]:
     client = AsyncOpenAI(base_url=server_url)
     response = await client.chat.completions.create(
-        model="", messages=prompt_to_messages(prompt, image)
+        model=model_name,
+        messages=prompt_to_messages(prompt, image),
+        temperature=temperature,
     )
-    return response.choices[0].message.content
+
+    usage = UsageData(
+        prompt_tokens=response.usage.prompt_tokens if response.usage else None,
+        completion_tokens=response.usage.completion_tokens if response.usage else None,
+        reasoning_tokens=None,
+        total_tokens=response.usage.total_tokens if response.usage else None,
+    )
+
+    return response.choices[0].message.content, None, usage
 
 
 def debug_compare_md(
@@ -195,17 +312,31 @@ class LLMClientException(Exception):
 
 
 async def eval_example(
-    example: Example, client: Callable[[str, Image.Image], Awaitable[str]]
+    example: Example,
+    client: Callable[[str, Image.Image], Awaitable[tuple[str, str | None, UsageData]]],
 ) -> tuple[
     SVGRewards | None,
     ImageComparisonResult | None,
     PreprocessedResponse | None,
     Exception | None,
+    str | None,
+    UsageData | None,
 ]:
+    # Initialize variables for early returns
+    thinking: str | None = None
+    usage: UsageData | None = None
+
     prompt = example["prompt"]
     gt_svg = extract_svg_text(example["completion"])
     if gt_svg is None:
-        return None, None, None, ValueError("Ground truth error: No SVG found")
+        return (
+            None,
+            None,
+            None,
+            ValueError("Ground truth error: No SVG found"),
+            thinking,
+            usage,
+        )
     # 2. Image loading
     try:
         gt_image = example["image"]
@@ -215,31 +346,31 @@ async def eval_example(
         if not isinstance(gt_image, Image.Image):
             raise ValueError(f"Expected Image.Image, got {type(gt_image)}: {gt_image}")
     except Exception as e:
-        return None, None, None, e
+        return None, None, None, e, thinking, usage
     # 3. Run completions
     try:
-        completion = await client(prompt, gt_image)
+        completion, thinking, usage = await client(prompt, gt_image)
     except Exception as e:
-        return None, None, None, e
+        return None, None, None, e, thinking, usage
     # 4. Parse and rasterize SVG
     try:
-        rasterized = svg_env(completion, gt_svg)
+        rasterized = svg_env(completion, gt_svg, thinking, usage)
     except Exception as e:
-        return None, None, None, e
+        return None, None, None, e, thinking, usage
     # 5. Image comparison
     try:
         image_scores = get_image_comparator().compare_images(
             rasterized.svg_im, rasterized.svg_im_gt
         )
     except Exception as e:
-        return None, None, rasterized, e
+        return None, None, rasterized, e, thinking, usage
     # 6. Reward computation
     try:
         rewards = compute_rewards(rasterized, image_scores)
     except Exception as e:
-        return None, image_scores, rasterized, e
+        return None, image_scores, rasterized, e, thinking, usage
     # OK!
-    return rewards, image_scores, rasterized, None
+    return rewards, image_scores, rasterized, None, thinking, usage
 
 
 def default_prompt(image: Image.Image) -> str:
@@ -272,7 +403,7 @@ def calculate_stats(results: list[SVGRewards]) -> dict[str, Stats]:
 
 async def run_eval(
     config: DatasetConfig,
-    client: Callable[[str, Image.Image], Awaitable[str]],
+    client: Callable[[str, Image.Image], Awaitable[tuple[str, str | None]]],
     output_dir: Path,
     num_eval_examples: int = 100,
     debug_dump: bool = False,
@@ -334,12 +465,16 @@ async def run_eval(
 
     jsonl_path = output_dir / "llm_responses.jsonl"
 
-    async def worker(i: int, example: Example) -> tuple[SVGRewards, str, dict]:
+    async def worker(
+        i: int, example: Example
+    ) -> tuple[SVGRewards, str, dict, str | None, UsageData | None]:
         id = f"{i:05d}"
         logger.debug(f"Starting evaluation of example {id}")
 
         image_paths = {}
-        rewards, image_scores, result, exc = await eval_example(example, client)
+        rewards, image_scores, result, exc, thinking, usage = await eval_example(
+            example, client
+        )
         status = "OK" if exc is None else "FAIL"
         error_message = None
 
@@ -392,8 +527,14 @@ async def run_eval(
             "id": id,
             "prompt": prompt,
             "response": result.response_str if result is not None else None,
+            "thinking": thinking,
             "svg": result.svg if result is not None else None,
             "svg_gt": svg_gt,
+            # usage data
+            "prompt_tokens": usage["prompt_tokens"] if usage else None,
+            "completion_tokens": usage["completion_tokens"] if usage else None,
+            "reasoning_tokens": usage["reasoning_tokens"] if usage else None,
+            "total_tokens": usage["total_tokens"] if usage else None,
             # dump images if we have them - map logical names to field names
             "svg_image": image_paths.get("svg", ""),
             "svg_gt_image": image_paths.get("svg_gt", ""),
@@ -422,12 +563,14 @@ async def run_eval(
             "status": status,
             "error": error_message,
         }
-        return (rewards, debug_md, record)
+        return (rewards, debug_md, record, thinking, usage)
 
     # Use parallel arrays with same length, indexed by original order
     results = [None] * len(example_list)
     debug_mds = [None] * len(example_list)
     records = [None] * len(example_list)
+    thinkings = [None] * len(example_list)
+    usages = [None] * len(example_list)
 
     # Create semaphore to limit concurrent requests
     semaphore = asyncio.Semaphore(num_workers)
@@ -445,10 +588,12 @@ async def run_eval(
         total=len(tasks),
         desc="Evaluating examples",
     ):
-        i, (rewards, md, record) = await task
+        i, (rewards, md, record, thinking, usage) = await task
         results[i] = rewards
         debug_mds[i] = md
         records[i] = record
+        thinkings[i] = thinking
+        usages[i] = usage
 
     # Calculate success rate
     total_examples = len(results)
@@ -529,18 +674,141 @@ async def run_eval(
     return results
 
 
-def anthropic_client(
-    prompt: str, image: Image.Image, model_name: str = "claude-3-opus-20240229"
-) -> str:
-    # Stub for Anthropic client
-    raise NotImplementedError("Anthropic client not implemented yet.")
+async def anthropic_client(
+    prompt: str,
+    image: Image.Image,
+    model_name: str = "claude-3-5-sonnet-20241022",
+    thinking_budget: int = 4000,
+    temperature: float = 1.0,
+) -> tuple[str, str | None, UsageData]:
+    """Anthropic Claude client that returns (response, thinking) tuple"""
+    client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+    # Enable thinking for Claude 4 models
+    thinking_config = None
+    if "claude-sonnet-4" in model_name or "claude-4" in model_name:
+        thinking_config = {"type": "enabled", "budget_tokens": thinking_budget}
+
+    message_params = {
+        "model": model_name,
+        "max_tokens": 4000,
+        "temperature": temperature,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_to_base64(image),
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+
+    if thinking_config:
+        message_params["thinking"] = thinking_config
+
+    message = await client.messages.create(**message_params)
+
+    # Extract response text and thinking
+    response_text = ""
+    thinking_text = ""
+
+    for content_block in message.content:
+        if content_block.type == "text":
+            response_text = content_block.text
+        elif content_block.type == "thinking":
+            thinking_text = content_block.text
+
+    usage = UsageData(
+        prompt_tokens=message.usage.input_tokens if message.usage else None,
+        completion_tokens=message.usage.output_tokens if message.usage else None,
+        reasoning_tokens=None,  # Anthropic doesn't separate reasoning tokens yet
+        total_tokens=(message.usage.input_tokens + message.usage.output_tokens)
+        if message.usage
+        else None,
+    )
+
+    return response_text, thinking_text if thinking_text else None, usage
 
 
-def google_client(
-    prompt: str, image: Image.Image, model_name: str = "gemini-pro-vision"
-) -> str:
-    # Stub for Google client
-    raise NotImplementedError("Google client not implemented yet.")
+async def google_client(
+    prompt: str,
+    image: Image.Image,
+    model_name: str = "gemini-2.5-flash",
+    thinking_budget: int = 4000,
+    temperature: float = 1.0,
+) -> tuple[str, str | None, UsageData]:
+    """Google Gemini client that returns (response, thinking) tuple"""
+    client = genai.Client(api_key=os.getenv("GOOGLE_GENERATIVE_AI_API_KEY"))
+
+    with BytesIO() as buffered:
+        image.save(buffered, format="PNG")
+        image_data = buffered.getvalue()
+
+    # Prepare content with text and image
+    contents = [
+        types.Content(
+            parts=[
+                types.Part(text=prompt),
+                types.Part(
+                    inline_data=types.Blob(mime_type="image/png", data=image_data)
+                ),
+            ]
+        )
+    ]
+
+    # Configure thinking for 2.5 models
+    config = None
+    if "2.5" in model_name:
+        config = types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(
+                include_thoughts=True, thinking_budget=thinking_budget
+            ),
+            temperature=temperature,
+        )
+    else:
+        config = types.GenerateContentConfig(temperature=temperature)
+
+    response = await client.aio.models.generate_content(
+        model=model_name, contents=contents, config=config
+    )
+
+    # Extract response text and thinking
+    response_text = response.text
+    thinking_text = None
+
+    if response.candidates:
+        candidate = response.candidates[0]
+        if candidate.content and candidate.content.parts:
+            for part in candidate.content.parts:
+                if part.thought:
+                    if thinking_text is None:
+                        thinking_text = ""
+                    thinking_text += part.text
+
+    if response.usage_metadata:
+        usage = UsageData(
+            prompt_tokens=response.usage_metadata.prompt_token_count,
+            completion_tokens=response.usage_metadata.candidates_token_count,
+            reasoning_tokens=response.usage_metadata.thoughts_token_count,
+            total_tokens=response.usage_metadata.total_token_count,
+        )
+    else:
+        usage = UsageData(
+            prompt_tokens=None,
+            completion_tokens=None,
+            reasoning_tokens=None,
+            total_tokens=None,
+        )
+
+    return response_text, thinking_text, usage
 
 
 parser = argparse.ArgumentParser(description="Evaluate SVG generation models.")
@@ -562,14 +830,14 @@ parser.add_argument(
     "--client",
     type=str,
     default="openai",
-    choices=["openai", "anthropic", "google", "vllm"],
+    choices=["openai", "openai-responses", "anthropic", "google", "vllm"],
     help="Which client/model to use.",
 )
 parser.add_argument(
     "--model_name",
     type=str,
     default="gpt-4.1-mini",
-    help="Model name for OpenAI/Anthropic/Google clients. For vllm, just determines what directory to write to, you must load the correct model separately.",
+    help="Model name for OpenAI/OpenAI-responses/Anthropic/Google/vLLM clients. For vllm, you must also start the vLLM server separately with the correct model.",
 )
 parser.add_argument(
     "--vllm_endpoint",
@@ -578,7 +846,10 @@ parser.add_argument(
     help="Base URL for vllm endpoint (required if client is vllm).",
 )
 parser.add_argument(
-    "--debug_dump", action="store_true", help="Dump debug markdown with images."
+    "--debug_dump",
+    action="store_true",
+    default=True,
+    help="Dump debug markdown with images.",
 )
 parser.add_argument(
     "--output_dir",
@@ -592,6 +863,12 @@ parser.add_argument(
     default=1,
     help="Number of parallel workers to use for evaluation.",
 )
+parser.add_argument(
+    "--temperature",
+    type=float,
+    default=1.0,
+    help="Temperature for generation (default: 1.0). Higher values make output more random, lower values make it more deterministic.",
+)
 
 
 if __name__ == "__main__":
@@ -600,17 +877,49 @@ if __name__ == "__main__":
     dataset_config = datasets[args.dataset]
 
     if args.client == "openai":
-        client_fn = partial(openai_client, model_name=args.model_name)
+        client_fn = partial(
+            openai_client, model_name=args.model_name, temperature=args.temperature
+        )
+    elif args.client == "openai-responses":
+        client_fn = partial(
+            openai_reasoning_client,
+            model_name=args.model_name,
+            temperature=args.temperature,
+        )
     elif args.client == "anthropic":
-        client_fn = partial(anthropic_client, model_name=args.model_name)
+        client_fn = partial(
+            anthropic_client,
+            model_name=args.model_name,
+            thinking_budget=4000,
+            temperature=args.temperature,
+        )
     elif args.client == "google":
-        client_fn = partial(google_client, model_name=args.model_name)
+        client_fn = partial(
+            google_client,
+            model_name=args.model_name,
+            thinking_budget=4000,
+            temperature=args.temperature,
+        )
     elif args.client == "vllm":
         if not args.vllm_endpoint:
             raise ValueError(
                 "--vllm_endpoint must be specified when using vllm client."
             )
-        client_fn = partial(vllm_client, server_url=args.vllm_endpoint)
+
+        # Check vLLM server health before starting evaluation
+        print("🔍 Checking vLLM server health...")
+        if not asyncio.run(check_vllm_server_health(args.vllm_endpoint)):
+            raise LLMClientException(
+                f"vLLM server at {args.vllm_endpoint} is not healthy. Please ensure the server is running."
+            )
+        print("✅ vLLM server health check passed!")
+
+        client_fn = partial(
+            vllm_client,
+            server_url=args.vllm_endpoint,
+            model_name=args.model_name,
+            temperature=args.temperature,
+        )
     else:
         raise ValueError(f"Unknown client: {args.client}")
 

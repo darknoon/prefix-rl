@@ -160,6 +160,13 @@ def edge_to_pil(edge_map_tensor: torch.Tensor) -> PILImage.Image:
     return edge_map_pil
 
 
+class UsageData(TypedDict):
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    reasoning_tokens: int | None
+    total_tokens: int | None
+
+
 @dataclass
 class ImageComparisonResult:
     l2: float  # L2 distance between normalized images
@@ -417,6 +424,8 @@ class PreprocessedResponse:
     svg_gt: str
     svg_im: PILImage.Image
     svg_im_gt: PILImage.Image
+    thinking: str | None = None
+    usage: UsageData | None = None
 
 
 def expected_response(
@@ -441,7 +450,7 @@ def dreamsim_reward(dreamsim: float) -> float:
     return 1.0 - 2.0 * dreamsim
 
 
-def svg_env(response_str: str, svg_gt: str) -> PreprocessedResponse | None:
+def svg_env(response_str: str, svg_gt: str, thinking: str | None = None, usage: UsageData | None = None) -> PreprocessedResponse | None:
     """
     Turns a response and ground truth svg (just the content within <answer> tags) into rasterized images for comparison.
     Also computes the format and length rewards.
@@ -459,6 +468,8 @@ def svg_env(response_str: str, svg_gt: str) -> PreprocessedResponse | None:
         svg_gt=svg_gt,
         svg_im=svg_im,
         svg_im_gt=svg_gt_im,
+        thinking=thinking,
+        usage=usage,
     )
 
 
@@ -481,10 +492,16 @@ class MergedResult(TypedDict):
     id: str
     prompt: str
     response: str
+    thinking: str | None
     svg: str
     svg_gt: str
     status: Literal["OK", "FAIL"]
     error: str | None
+    # usage data
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    reasoning_tokens: int | None
+    total_tokens: int | None
     # dump images if we have them - using logical names from write_debug_images_dict
     svg_image: str  # filename for generated SVG image
     svg_gt_image: str  # filename for ground truth SVG image
