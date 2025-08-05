@@ -222,6 +222,31 @@ async def vllm_client(
     return response.choices[0].message.content, None, usage
 
 
+async def openrouter_client(
+    prompt: str,
+    image: Image.Image,
+    model_name: str = "openrouter/horizon-beta",
+    temperature: float = 1.0,
+) -> tuple[str, str | None, UsageData]:
+    """OpenRouter client using OpenAI-compatible API."""
+    client = AsyncOpenAI(
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        base_url="https://openrouter.ai/api/v1",
+    )
+    response = await client.chat.completions.create(
+        model=model_name,
+        messages=prompt_to_messages(prompt, image),
+        temperature=temperature,
+    )
+    usage = UsageData(
+        prompt_tokens=response.usage.prompt_tokens if response.usage else None,
+        completion_tokens=response.usage.completion_tokens if response.usage else None,
+        reasoning_tokens=None,
+        total_tokens=response.usage.total_tokens if response.usage else None,
+    )
+    return response.choices[0].message.content, None, usage
+
+
 def debug_compare_md(
     result: Optional[PreprocessedResponse] = None,
     image_scores: Optional[ImageComparisonResult] = None,
@@ -384,19 +409,26 @@ class Stats(TypedDict):
     max: float
 
 
-def calculate_stats(results: list[SVGRewards]) -> dict[str, Stats]:
+def calculate_stats(
+    results: list[dict[str, float]],
+    keys: list[str] = ["overall", "l2", "l2_canny", "dreamsim", "dreamsim_canny"],
+) -> dict[str, Stats]:
     if not results:
         return {}
-    # Collect all reward keys
-    reward_keys = ["overall", "l2", "l2_canny", "dreamsim", "dreamsim_canny"]
     stats: dict[str, Stats] = {}
-    for key in reward_keys:
-        values = [getattr(r, key) for r in results]
+    for key in keys:
+        # gather only present, non-None values
+        valid = [r.get(key) for r in results if r.get(key) is not None]
+        if not valid:
+            # no data for this key, don't cause an error
+            stats[key] = {"mean": None, "std": None, "min": None, "max": None}
+            continue
+        arr = np.array(valid, dtype=float)
         stats[key] = {
-            "mean": float(np.mean(values)),
-            "std": float(np.std(values)),
-            "min": float(np.min(values)),
-            "max": float(np.max(values)),
+            "mean": float(np.mean(arr)),
+            "std": float(np.std(arr)),
+            "min": float(np.min(arr)),
+            "max": float(np.max(arr)),
         }
     return stats
 
@@ -608,7 +640,21 @@ async def run_eval(
         f"Evaluation completed: {total_examples} examples processed, {failed_examples} failed, {success_rate:.1%} success rate"
     )
 
-    stats = calculate_stats(results)
+    # Build list of metrics including raw values and rewards
+    metric_keys = [
+        "l2",
+        "l2_canny",
+        "dreamsim",
+        "dreamsim_canny",
+        "reward_format",
+        "reward_length",
+        "reward_l2",
+        "reward_l2_canny",
+        "reward_dreamsim",
+        "reward_dreamsim_canny",
+        "reward_overall",
+    ]
+    stats = calculate_stats(records, keys=metric_keys)
     stats["success_rate"] = {
         "mean": success_rate,
         "std": None,
@@ -654,7 +700,7 @@ async def run_eval(
         return f"{x:.4f}" if x is not None else ""
 
     with csv_path.open("w") as f:
-        f.write("model_name,reward_key,mean,std,min,max\n")
+        f.write("model_name,metric,mean,std,min,max\n")
         for key, stat in stats.items():
             mean, std, min_, max_ = (
                 stat["mean"],
@@ -830,7 +876,7 @@ parser.add_argument(
     "--client",
     type=str,
     default="openai",
-    choices=["openai", "openai-responses", "anthropic", "google", "vllm"],
+    choices=["openai", "openai-responses", "anthropic", "google", "vllm", "openrouter"],
     help="Which client/model to use.",
 )
 parser.add_argument(
@@ -898,6 +944,12 @@ if __name__ == "__main__":
             google_client,
             model_name=args.model_name,
             thinking_budget=4000,
+            temperature=args.temperature,
+        )
+    elif args.client == "openrouter":
+        client_fn = partial(
+            openrouter_client,
+            model_name=args.model_name,
             temperature=args.temperature,
         )
     elif args.client == "vllm":
