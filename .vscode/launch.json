@@ -16,11 +16,79 @@
             }
         },
         {
-            "name": "Debug svg_eval.py --debug_dump --dataset svg-stack --client openai --model gpt-4.1-mini",
+            "name": "Debug svg_eval.py svg-stack / gpt-4.1-mini",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/svg_eval.py",
-            "args": ["--debug_dump", "--dataset", "svg-stack", "--client", "openai", "--model", "gpt-4.1-mini", "-n", "300"],
+            "args": ["--debug_dump", "--dataset", "svg-stack", "--client", "openai", "--model", "gpt-4.1-mini", "--temperature", "0.1", "-n", "300", "--num_workers", "8"],
+            "console": "integratedTerminal",
+            "env": {
+                "DREAMSIM_CACHE_DIR": "${workspaceFolder}/models",
+                "DYLD_LIBRARY_PATH": "/opt/homebrew/lib:${env:DYLD_LIBRARY_PATH}"
+            }
+        },
+        {
+            "name": "Debug svg_eval.py svg-stack / gemini-2.5-flash",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/svg_eval.py",
+            "args": ["--debug_dump", "--dataset", "svg-stack", "--client", "google", "--model", "gemini-2.5-flash", "--temperature", "0.1", "-n", "300", "--num_workers", "1"],
+            "console": "integratedTerminal",
+            "env": {
+                "DREAMSIM_CACHE_DIR": "${workspaceFolder}/models",
+                "DYLD_LIBRARY_PATH": "/opt/homebrew/lib:${env:DYLD_LIBRARY_PATH}"
+            }
+        },
+        {
+            "name": "Debug svg_eval.py vLLM / Qwen2.5-VL",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/svg_eval.py",
+            "args": [
+                "--debug_dump",
+                "--dataset", "simple-shapes",
+                "--client", "vllm",
+                "--vllm_endpoint", "https://prefix--prefix-rl-vllm-server-serve-dev.modal.run/v1",
+                "--model_name", "Qwen/Qwen2.5-VL-3B-Instruct",
+                "--temperature", "0.1",
+                "-n", "2",
+                "--num_workers", "1"
+            ],
+            "console": "integratedTerminal",
+            "env": {
+                "DREAMSIM_CACHE_DIR": "${workspaceFolder}/models",
+                "DYLD_LIBRARY_PATH": "/opt/homebrew/lib:${env:DYLD_LIBRARY_PATH}"
+            }
+        },
+        {
+            "name": "Debug test_vllm.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/test_vllm.py",
+            "console": "integratedTerminal",
+            "env": {
+                "DREAMSIM_CACHE_DIR": "${workspaceFolder}/models",
+                "DYLD_LIBRARY_PATH": "/opt/homebrew/lib:${env:DYLD_LIBRARY_PATH}"
+            }
+        },
+        {
+            "name": "Debug test_health_check.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/test_health_check.py",
+            "args": ["--vllm_endpoint", "https://prefix--prefix-rl-vllm-server-serve-dev.modal.run/v1"],
+            "console": "integratedTerminal",
+            "env": {
+                "DREAMSIM_CACHE_DIR": "${workspaceFolder}/models",
+                "DYLD_LIBRARY_PATH": "/opt/homebrew/lib:${env:DYLD_LIBRARY_PATH}"
+            }
+        },
+        {
+            "name": "Debug test_temperature.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/test_temperature.py",
+            "args": ["--temperature", "0.1", "--model", "gpt-4o-mini"],
             "console": "integratedTerminal",
             "env": {
                 "DREAMSIM_CACHE_DIR": "${workspaceFolder}/models",
