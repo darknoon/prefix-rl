@@ -235,9 +235,9 @@ def debug_compare_md(
     if error is not None:
         output.append("# Debug Compare (Error)\n\n")
         output.append(f"## Error for example {id}:\n\n")
-        output.append("```")
+        output.append("```\n")
         output.append(f"{error}\n")
-        output.append("```")
+        output.append("```\n")
         return "".join(output), rel_paths
     if result is None or image_scores is None:
         output.append("# Debug Compare\n\n")
