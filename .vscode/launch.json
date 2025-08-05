@@ -61,6 +61,26 @@
             }
         },
         {
+            "name": "Debug svg_eval.py openrouter / horizon-beta",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/svg_eval.py",
+            "args": [
+                "--debug_dump",
+                "--dataset", "simple-shapes",
+                "--client", "openrouter",
+                "--model_name", "openrouter/horizon-beta",
+                "--temperature", "0.1",
+                "-n", "2",
+                "--num_workers", "1"
+            ],
+            "console": "integratedTerminal",
+            "env": {
+                "DREAMSIM_CACHE_DIR": "${workspaceFolder}/models",
+                "DYLD_LIBRARY_PATH": "/opt/homebrew/lib:${env:DYLD_LIBRARY_PATH}"
+            }
+        },
+        {
             "name": "Debug test_vllm.py",
             "type": "debugpy",
             "request": "launch",
