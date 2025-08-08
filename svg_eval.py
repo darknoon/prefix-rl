@@ -155,14 +155,27 @@ async def openai_reasoning_client(
     return content, None, usage
 
 
-import asyncio
-
-
 def health_check_url(server_url: str) -> str:
     base_url = server_url.rstrip("/")
     if base_url.endswith("/v1"):
         base_url = base_url[:-3]  # Remove /v1
     return f"{base_url}/health"
+
+
+def normalize_openai_base_url(server_url: str) -> str:
+    """Return a base URL that always ends with /v1 for OpenAI-compatible clients.
+
+    Accepts inputs like:
+    - https://host
+    - https://host/
+    - https://host/v1
+    - https://host/v1/
+    and normalizes them to https://host/v1
+    """
+    base_url = server_url.rstrip("/")
+    if not base_url.endswith("/v1"):
+        base_url = f"{base_url}/v1"
+    return base_url
 
 
 async def check_vllm_server_health(server_url: str) -> bool:
@@ -205,7 +218,7 @@ async def vllm_client(
     model_name: str = "Qwen/Qwen2.5-VL-3B-Instruct",
     temperature: float = 1.0,
 ) -> tuple[str, str | None, UsageData]:
-    client = AsyncOpenAI(base_url=server_url)
+    client = AsyncOpenAI(base_url=normalize_openai_base_url(server_url))
     response = await client.chat.completions.create(
         model=model_name,
         messages=prompt_to_messages(prompt, image),
@@ -889,7 +902,7 @@ parser.add_argument(
     "--vllm_endpoint",
     type=str,
     default=None,
-    help="Base URL for vllm endpoint (required if client is vllm).",
+    help="Base URL for vLLM endpoint (with or without /v1 is fine; required if client is vllm).",
 )
 parser.add_argument(
     "--debug_dump",
