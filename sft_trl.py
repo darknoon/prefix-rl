@@ -57,11 +57,42 @@ from trl import (
 )
 
 
+def image_valid(image: Image.Image, max_aspect_ratio: float = 195.0) -> bool:
+    """
+    The Qwen2.5-VL model has a hardcoded limit of 200 in smart_resize
+    """
+    width, height = image.size
+    aspect_ratio = max(width / height, height / width)
+    return aspect_ratio <= max_aspect_ratio
+
+
+# hack, filter images with invalid aspect ratios. should probably do this in the dataset instead
+def _all_images_valid(images, max_aspect_ratio=195.0):
+    if isinstance(images, list):
+        return all(
+            isinstance(img, Image.Image) and image_valid(img, max_aspect_ratio)
+            for img in images
+        )
+    elif isinstance(images, Image.Image):
+        return image_valid(images, max_aspect_ratio)
+    else:
+        return False
+
+
 def make_tokenized_batch(
     processor: Qwen2_5_VLProcessor, examples: list[dict], max_length: int
 ):
     # Build conversations with explicit image placeholders so the chat template inserts image tokens
     image_column = "image"
+
+    examples = [e for e in examples if _all_images_valid(e[image_column])]
+
+    if len(examples) == 0:
+        print(
+            "ERROR: All examples in batch were filtered out due to invalid aspect ratios. Probably going to crash.",
+            examples,
+        )
+
     conversations = [
         format_example(
             example,
