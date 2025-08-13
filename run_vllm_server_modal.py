@@ -51,7 +51,11 @@ class VLLMServer:
     model_name: str = modal.parameter()
     model_revision: str = modal.parameter(default="")
 
-    @modal.web_server(port=VLLM_PORT, startup_timeout=VLLM_STARTUP_TIMEOUT)
+    @modal.web_server(
+        port=VLLM_PORT,
+        startup_timeout=VLLM_STARTUP_TIMEOUT,
+        requires_proxy_auth=True,
+    )
     def serve(self):
         """Start a vLLM server for inference."""
         from subprocess import Popen
@@ -98,6 +102,10 @@ ALLOWED_MODELS = [
 @app.function(
     image=router_image,
     timeout=10 * MINUTE,
+    secrets=[
+        modal.Secret.from_name("vllm-proxy-allowed-keys"),
+        modal.Secret.from_name("modal-proxy-key"),
+    ],
 )
 @modal.concurrent(max_inputs=256)
 @modal.asgi_app()
@@ -107,11 +115,20 @@ def vllm_proxy():
     from fastapi.responses import StreamingResponse
     import httpx
     import json
+    import os
 
     router = FastAPI()
     # dummy model name to get the base URL :/
     base_url = VLLMServer(model_name="Qwen/Qwen2.5-VL-7B-Instruct").serve.get_web_url()
     print(f"Starting proxy server to base URL: {base_url}")
+
+    # Resolve approved keys from env or fallback list
+    env_keys = os.environ.get("VLLM_PROXY_API_KEYS", "")
+    # allow connecting to the private vllm endpoint
+    modal_key = os.environ["MODAL_PROXY_KEY"]
+    modal_secret = os.environ["MODAL_PROXY_SECRET"]
+    approved_keys = set(k.strip() for k in env_keys.split(",") if k.strip())
+    print(f"vLLM proxy loaded {len(approved_keys)} approved API key(s)")
 
     def parse_body(body: bytes) -> dict:
         try:
@@ -119,9 +136,26 @@ def vllm_proxy():
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid JSON body")
 
+    def require_api_key(request: Request):
+        auth_header = request.headers.get("authorization")
+        if not auth_header or not auth_header.lower().startswith("bearer "):
+            raise HTTPException(
+                status_code=401,
+                detail="Unauthorized",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        token = auth_header.split(" ", 1)[1].strip()
+        if token not in approved_keys:
+            raise HTTPException(
+                status_code=401,
+                detail="Unauthorized",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
     @router.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         """Proxy chat completions to model-specific server, always streaming response."""
+        require_api_key(request)
         raw_body = await request.body()
         body = parse_body(raw_body)
 
@@ -131,7 +165,11 @@ def vllm_proxy():
 
         # Modal requires the class parameter for routing to the correct instance
         target_url = f"{base_url}/v1/chat/completions?model_name={model_name}"
-        req_headers = {"content-type": "application/json"}
+        req_headers = {
+            "content-type": "application/json",
+            "Modal-Key": modal_key,
+            "Modal-Secret": modal_secret,
+        }
 
         # Modal will throw a fit if any headers like `modal-function-call-id` are set, so filter them out
         def filter_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -165,7 +203,8 @@ def vllm_proxy():
             raise
 
     @router.get("/v1/models")
-    async def list_models():
+    async def list_models(request: Request):
+        require_api_key(request)
         """List available models with container status information."""
         import asyncio
 
@@ -218,18 +257,18 @@ def vllm_proxy():
 # -----------------------------------------------------------------------------
 # Testing functions -------------------------------------------------------------
 # -----------------------------------------------------------------------------
-async def _test_chat_completion(model_name: str, base_url: str, content=None):
+async def _test_chat_completion(model_name: str, base_url: str, api_key: str = None):
     from openai import AsyncOpenAI
-
-    messages = [
-        {"role": "user", "content": content or "Hello"},
-    ]
 
     client = AsyncOpenAI(
         base_url=f"{base_url}/v1",
         default_query={"model_name": model_name},
-        api_key="dummy-key",  # vLLM doesn't require authentication by default
+        api_key=api_key or "dummy-key",
     )
+
+    messages = [
+        {"role": "user", "content": "Hello"},
+    ]
 
     print(f"Sending messages to {base_url}:", *messages, sep="\n\t")
     stream = await client.chat.completions.create(
@@ -258,18 +297,19 @@ def main(model_name: str = "Qwen/Qwen2.5-VL-7B-Instruct"):
     For running the server just do `modal serve run_vllm_server_modal.py`
     """
     import asyncio
+    import os
 
     use_proxy = True
 
-    async def test_vllm_direct(
-        model_name: str, base_url: str, test_timeout=10 * MINUTE, content=None
-    ):
+    async def test_vllm_direct(model_name: str, base_url: str):
         await _health_check(base_url, health_path=f"/health?model_name={model_name}")
-        await _test_chat_completion(model_name, base_url, content)
+        await _test_chat_completion(model_name, base_url)
 
     async def test_vllm_proxy(model_name: str, proxy_url: str):
         await _health_check(proxy_url)
-        await _test_chat_completion(model_name, proxy_url)
+        await _test_chat_completion(
+            model_name, proxy_url, api_key=os.environ["API_KEY"]
+        )
 
     if use_proxy:
         url = vllm_proxy.get_web_url()
