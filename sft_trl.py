@@ -56,6 +56,11 @@ from trl import (
     get_quantization_config,
 )
 
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
 
 def image_valid(image: Image.Image, max_aspect_ratio: float = 195.0) -> bool:
     """
@@ -85,7 +90,10 @@ def make_tokenized_batch(
     # Build conversations with explicit image placeholders so the chat template inserts image tokens
     image_column = "image"
 
+    n = len(examples)
     examples = [e for e in examples if _all_images_valid(e[image_column])]
+    if wandb and wandb.run:
+        wandb.log({"data/invalid_examples": n - len(examples)})
 
     if len(examples) == 0:
         print(
@@ -118,6 +126,11 @@ def make_tokenized_batch(
         truncation=True,
         max_length=max_length,
     )
+
+    # Log padding stats to wandb
+    if wandb and wandb.run:
+        pad_mask = batch["input_ids"] == processor.tokenizer.pad_token_id
+        wandb.log({"data/padding_count": pad_mask.int().sum().item()})
 
     # The labels are the input_ids, and we mask the padding tokens in the loss computation
     labels = batch["input_ids"].clone()
