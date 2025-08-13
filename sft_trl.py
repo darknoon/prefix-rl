@@ -204,6 +204,10 @@ if __name__ == "__main__":
     training_args.remove_unused_columns = False
     training_args.dataset_kwargs = {"skip_prepare_dataset": True}
 
+    # Append wandb run name to output directory so multiple runs don't overwrite each other
+    if wandb and wandb.run:
+        training_args.output_dir = f"{training_args.output_dir}/{wandb.run.name}"
+
     ################
     # Model, Tokenizer & Processor
     ################

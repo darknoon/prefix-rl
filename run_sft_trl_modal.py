@@ -97,8 +97,8 @@ def train_sft_trl():
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
     os.environ.setdefault("WANDB_PROJECT", "prefix-rl-sft-trl")
-    num_gpus = int(os.environ.get("NUM_GPUS", "4"))
 
+    # Todo: move this into a config file "--config", see TRLParser.parse_args_and_config
     # Launch distributed training using accelerate
     cmd = [
         "accelerate",
