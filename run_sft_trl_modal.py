@@ -29,7 +29,7 @@ trl_image = (
         "tokenizers",
         # Vision / multimodal support
         "Pillow",
-        "timm",  # widely used by VLMs
+        # "timm",  # widely used by VLMs
         # Misc utilities
         "scipy",
         "einops",
@@ -73,7 +73,7 @@ HOUR = 60 * MINUTE
         modal.Secret.from_name("huggingface-write"),
     ],
 )
-def train_sft_trl(config_path: str):
+def train_sft_trl():
     """Fine-tune Qwen-2.5-VL on the given dataset using TRL (pure-Python).,
     
     eg
@@ -99,10 +99,6 @@ def train_sft_trl(config_path: str):
     os.environ.setdefault("WANDB_PROJECT", "prefix-rl-sft-trl")
     num_gpus = int(os.environ.get("NUM_GPUS", "4"))
 
-    print(
-        f"Starting TRL SFT training (num_processes={num_gpus}) with config: {config_path}"
-    )
-
     # Launch distributed training using accelerate
     cmd = [
         "accelerate",
@@ -113,26 +109,27 @@ def train_sft_trl(config_path: str):
         "--dataset_name",
         "darknoon/svg-stack-filtered",
         "--model_name_or_path",
-        "Qwen/Qwen2.5-VL-3B-Instruct",
+        "Qwen/Qwen2.5-VL-7B-Instruct",
         "--per_device_train_batch_size",
-        "8",
-        "--gradient_accumulation_steps",
-        "1",
+        "2",
         "--output_dir",
-        "/workspace/checkpoints/qwen2_5vl-3b_sft_svg_filtered",
+        "/workspace/checkpoints/qwen2_5vl-7b_sft_svg_filtered",
         "--bf16",
         "True",
         "--torch_dtype",
         "bfloat16",
         "--max_steps",
-        "1000",
+        "10000",
         "--learning_rate",
-        "1e-5",
+        "5e-6",
         "--save_steps",
-        "500",
+        "1000",
         "--logging_steps",
         "10",
         "--gradient_checkpointing",
+        "--max_length",
+        "4096",
+        # "32768", from the paper, should probably do this instead.
         "--trust_remote_code",
     ]
 
@@ -184,12 +181,11 @@ def upload_model_to_hf(model_path: str, repo_name: str):
 @app.local_entrypoint()
 def main():
     """Run training + (optionally) upload the checkpoint when invoked locally."""
-    CONFIG_PATH = "env/svg/config_svg_sft_3b.yaml"
-    MODEL_OUTPUT_PATH = "/workspace/checkpoints/qwen2_5vl-3b/full/sft"
-    HF_REPO_NAME = "darknoon/svg-stack-filtered-sft-qwen2.5-vl-3b-trl"
+    MODEL_OUTPUT_PATH = "/workspace/checkpoints/qwen2_5vl-7b/full/sft"
+    HF_REPO_NAME = "darknoon/svg-stack-filtered-sft-qwen2.5-vl-7b-trl"
 
     print("Launching distributed SFT job on Modal…")
-    train_sft_trl.remote(CONFIG_PATH)
+    train_sft_trl.remote()
 
     # Uncomment if you want to immediately push after training; many users
     # prefer doing this manually to double-check the run.

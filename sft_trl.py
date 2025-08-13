@@ -57,19 +57,35 @@ from trl import (
 )
 
 
-def make_tokenized_batch(processor: Qwen2_5_VLProcessor, examples: list[dict]):
-    # Get the texts and images, and apply the chat template
-    conversations = [format_example(example) for example in examples]
+def make_tokenized_batch(
+    processor: Qwen2_5_VLProcessor, examples: list[dict], max_length: int
+):
+    # Build conversations with explicit image placeholders so the chat template inserts image tokens
     image_column = "image"
+    conversations = [
+        format_example(
+            example,
+            prompt_column="prompt",
+            completion_column="completion",
+            image_column=image_column,
+        )
+        for example in examples
+    ]
     images = [example[image_column] for example in examples]
     texts = [processor.apply_chat_template(c, tokenize=False) for c in conversations]
 
-    # Tokenize the texts and process the images
+    # Ensure truncation happens on the right to preserve initial image tokens
+    processor.tokenizer.truncation_side = "right"
+    processor.tokenizer.padding_side = "right"
+
+    # Tokenize texts and process images together
     batch = processor(
         text=texts,
         images=images,
         return_tensors="pt",
         padding=True,
+        truncation=True,
+        max_length=max_length,
     )
 
     # The labels are the input_ids, and we mask the padding tokens in the loss computation
@@ -82,23 +98,56 @@ def make_tokenized_batch(processor: Qwen2_5_VLProcessor, examples: list[dict]):
     return batch
 
 
+def image_tag_to_multipart_message(prompt: str, image_count: int) -> list[dict]:
+    """
+    Convert
+    ```
+    "a prompt with <image> tag"
+    ```
+    to
+    ```
+    [
+        {"type": "text", "text": "a prompt with"},
+        {"type": "image"},
+        {"type": "text", "text": " tag"},
+    ]
+    ```
+    """
+    parts = prompt.split("<image>")
+    content = []
+    for i, part in enumerate(parts):
+        if part:
+            content.append({"type": "text", "text": part})
+        if i < image_count:
+            content.append({"type": "image"})
+        elif i > image_count + 1:
+            raise ValueError(
+                f"Too many <image> tags in prompt: {prompt} (expected {image_count})"
+            )
+    return content
+
+
 def format_example(
     example,
     prompt_column="prompt",
     completion_column="completion",
+    image_column="image",
 ) -> list[dict]:
-    """Turn an example from the dataset into text that's ready to be tokenized and the image"""
-    prompt = example[prompt_column]
+    """Format as multimodal messages; insert image placeholder where '<image>' appears."""
+    prompt_raw = example[prompt_column]
+    prompt = prompt_raw if isinstance(prompt_raw, str) else ""
     completion = example[completion_column]
+    images = example[image_column]
+    if isinstance(images, Image.Image):
+        images = [images]
+    elif isinstance(images, str):
+        images = [Image.open(images)]
+
+    content = image_tag_to_multipart_message(prompt, image_count=len(images))
+
     messages = [
-        {
-            "role": "user",
-            "content": prompt,
-        },
-        {
-            "role": "assistant",
-            "content": completion,
-        },
+        {"role": "user", "content": content},
+        {"role": "assistant", "content": completion},
     ]
 
     return messages
@@ -137,6 +186,12 @@ if __name__ == "__main__":
         **model_kwargs,
     )
 
+    # Freeze vision encoder to save memory - only train the language model
+    if hasattr(model, "visual"):
+        for param in model.visual.parameters():
+            param.requires_grad = False
+    print("🔒 Froze vision encoder parameters")
+
     ################
     # Dataset
     ################
@@ -148,7 +203,11 @@ if __name__ == "__main__":
     trainer = SFTTrainer(
         model=model,
         args=training_args,
-        data_collator=partial(make_tokenized_batch, processor),
+        data_collator=partial(
+            make_tokenized_batch,
+            processor,
+            max_length=training_args.max_length,
+        ),
         train_dataset=dataset[script_args.dataset_train_split],
         eval_dataset=dataset[script_args.dataset_test_split]
         if training_args.eval_strategy != "no"
