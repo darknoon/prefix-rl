@@ -19,7 +19,7 @@ trl_checkpoints_vol = modal.Volume.from_name(
 trl_image = (
     Image.from_registry("pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel")
     .apt_install("git")
-    .pip_install(
+    .uv_pip_install(
         # Core
         "transformers",
         "datasets",
@@ -43,6 +43,7 @@ trl_image = (
         "wandb",
         "deepspeed",
     )
+    .uv_pip_install("flash-attn", extra_options="--no-build-isolation")
     .workdir("/workspace")
     .add_local_file("sft_trl.py", "/workspace/sft_trl.py")
     .add_local_dir("env/svg", "/workspace/env/svg")
@@ -98,39 +99,17 @@ def train_sft_trl():
 
     os.environ.setdefault("WANDB_PROJECT", "prefix-rl-sft-trl")
 
-    # Todo: move this into a config file "--config", see TRLParser.parse_args_and_config
-    # Launch distributed training using accelerate
+    # Launch distributed training using accelerate with TRL config
     cmd = [
         "accelerate",
         "launch",
         "--config_file",
         "/workspace/deepspeed_zero3.yaml",
         "/workspace/sft_trl.py",
-        "--dataset_name",
-        "darknoon/svg-stack-filtered",
-        "--model_name_or_path",
-        "Qwen/Qwen2.5-VL-7B-Instruct",
-        "--per_device_train_batch_size",
-        "2",
+        "--config",
+        "/workspace/env/svg/config_svg_sft_7b.yaml",
         "--output_dir",
         "/workspace/checkpoints/qwen2_5vl-7b_sft_svg_filtered",
-        "--bf16",
-        "True",
-        "--torch_dtype",
-        "bfloat16",
-        "--max_steps",
-        "10000",
-        "--learning_rate",
-        "5e-6",
-        "--save_steps",
-        "1000",
-        "--logging_steps",
-        "10",
-        "--gradient_checkpointing",
-        "--max_length",
-        "4096",
-        # "32768", from the paper, should probably do this instead.
-        "--trust_remote_code",
     ]
 
     print(f"Running: {' '.join(cmd)}")
@@ -152,7 +131,7 @@ def train_sft_trl():
 )
 def upload_model_to_hf(model_path: str, repo_name: str):
     """Upload a checkpoint to the Hugging Face Hub."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor
+    from transformers import AutoModelForImageTextToText, AutoTokenizer, AutoProcessor
     from huggingface_hub import HfApi
     import os
 
@@ -162,8 +141,10 @@ def upload_model_to_hf(model_path: str, repo_name: str):
     api.create_repo(repo_id=repo_name, repo_type="model", exist_ok=True)
 
     print(f"Loading model from {model_path}…")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path, torch_dtype="auto", device_map="auto"
+    model = AutoModelForImageTextToText.from_pretrained(
+        model_path,
+        torch_dtype="auto",
+        device_map="auto",
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     processor = AutoProcessor.from_pretrained(model_path)

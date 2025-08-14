@@ -35,12 +35,14 @@ For meta-llama/Llama-3.2-11B-Vision-Instruct, use: (requires transformers>=4.45.
     --model_name_or_path meta-llama/Llama-3.2-11B-Vision-Instruct
 """
 
+from dataclasses import dataclass, field
 from functools import partial
 import torch
 from datasets import load_dataset
 from transformers import (
-    AutoModelForVision2Seq,
+    AutoModelForImageTextToText,
     AutoProcessor,
+    Qwen2_5_VLForConditionalGeneration,
     Qwen2_5_VLProcessor,
 )
 from PIL import Image
@@ -60,6 +62,39 @@ try:
     import wandb
 except ImportError:
     wandb = None
+
+
+@dataclass
+class ExtraConfig:
+    """Enhanced training configuration with additional parameters."""
+
+    # Torch compilation settings
+    torch_compile: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to compile the model with torch.compile for faster training"
+        },
+    )
+    torch_compile_backend: str = field(
+        default="inductor",
+        metadata={
+            "help": "Backend to use for torch.compile (inductor, aot_eager, cudagraphs)"
+        },
+    )
+    torch_compile_mode: str = field(
+        default="default",
+        metadata={
+            "help": "Compilation mode (default, reduce-overhead, max-autotune, max-autotune-no-cudagraphs)"
+        },
+    )
+
+    # Vision encoder settings
+    freeze_vision_encoder: bool = field(
+        default=True,
+        metadata={
+            "help": "Whether to freeze the vision encoder parameters to save memory"
+        },
+    )
 
 
 def image_valid(image: Image.Image, max_aspect_ratio: float = 195.0) -> bool:
@@ -198,8 +233,8 @@ def format_example(
 
 
 if __name__ == "__main__":
-    parser = TrlParser((ScriptArguments, SFTConfig, ModelConfig))
-    script_args, training_args, model_args = parser.parse_args_and_config()
+    parser = TrlParser((ScriptArguments, SFTConfig, ModelConfig, ExtraConfig))
+    script_args, training_args, model_args, our_args = parser.parse_args_and_config()
     training_args.gradient_checkpointing_kwargs = dict(use_reentrant=False)
     training_args.remove_unused_columns = False
     training_args.dataset_kwargs = {"skip_prepare_dataset": True}
@@ -228,17 +263,25 @@ if __name__ == "__main__":
         model_args.model_name_or_path, trust_remote_code=model_args.trust_remote_code
     )
 
-    model = AutoModelForVision2Seq.from_pretrained(
+    model = AutoModelForImageTextToText.from_pretrained(
         model_args.model_name_or_path,
         trust_remote_code=model_args.trust_remote_code,
         **model_kwargs,
     )
 
+    # Apply torch compilation if enabled (this is not working with deepspeed zero-3)
+    if our_args.torch_compile:
+        model = torch.compile(
+            model,
+            backend=our_args.torch_compile_backend,
+            mode=our_args.torch_compile_mode,
+        )
+
     # Freeze vision encoder to save memory - only train the language model
-    if hasattr(model, "visual"):
+    if our_args.freeze_vision_encoder:
         for param in model.visual.parameters():
             param.requires_grad = False
-    print("🔒 Froze vision encoder parameters")
+        print("🔒 Froze vision encoder parameters")
 
     ################
     # Dataset
