@@ -13,7 +13,7 @@ dependencies = [
     "ipykernel>=6.29.5",
     "ipywidgets>=8.1.7",
     "matplotlib>=3.9.4",
-    "modal>=1.0.2",
+    "modal>=1.1.0",
     "numpy>=2.0.2",
     "omegaconf>=2.3.0",
     "openai>=1.82.0",
@@ -24,6 +24,7 @@ dependencies = [
     "seaborn>=0.13.2",
     "torch>=2.7.0",
     "torchvision>=0.22.0",
-    "transformers>=4.52.3",
+    "transformers>=4.55.0",
+    "trl>=0.19.1",
     "wandb>=0.21.0",
 ]
