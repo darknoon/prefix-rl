@@ -218,7 +218,10 @@ async def vllm_client(
     model_name: str = "Qwen/Qwen2.5-VL-3B-Instruct",
     temperature: float = 1.0,
 ) -> tuple[str, str | None, UsageData]:
-    client = AsyncOpenAI(base_url=normalize_openai_base_url(server_url))
+    client = AsyncOpenAI(
+        base_url=normalize_openai_base_url(server_url),
+        api_key=os.getenv("VLLM_API_KEY", ""),
+    )
     response = await client.chat.completions.create(
         model=model_name,
         messages=prompt_to_messages(prompt, image),
