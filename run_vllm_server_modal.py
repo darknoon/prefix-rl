@@ -299,15 +299,13 @@ async def _health_check(base_url: str, health_path: str = "/health"):
 
 
 @app.local_entrypoint()
-def main(model_name: str = "Qwen/Qwen2.5-VL-7B-Instruct"):
+def main(model_name: str = "Qwen/Qwen2.5-VL-7B-Instruct", test_proxy: bool = True):
     """
     Quick test of the vLLM server.
     For running the server just do `modal serve run_vllm_server_modal.py`
     """
     import asyncio
     import os
-
-    use_proxy = True
 
     async def test_vllm_direct(model_name: str, base_url: str):
         await _health_check(base_url, health_path=f"/health?model_name={model_name}")
@@ -319,7 +317,7 @@ def main(model_name: str = "Qwen/Qwen2.5-VL-7B-Instruct"):
             model_name, proxy_url, api_key=os.environ["API_KEY"]
         )
 
-    if use_proxy:
+    if test_proxy:
         url = vllm_proxy.get_web_url()
         asyncio.run(test_vllm_proxy(model_name, url))
     else:
