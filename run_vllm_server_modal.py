@@ -5,8 +5,8 @@ app = modal.App("prefix-rl-vllm-server")
 vllm_image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(
-        "vllm==0.9.1",
-        "huggingface_hub[hf_transfer]==0.32.0",
+        "vllm==0.10.0",
+        "huggingface_hub[hf_transfer]",
         "flashinfer-python==0.2.6.post1",
         "qwen-vl-utils",
         "openai",
@@ -29,8 +29,9 @@ VLLM_PORT = 8000
 # account for at least this on cold start
 VLLM_STARTUP_TIMEOUT = 4 * MINUTE
 VLLM_REQUEST_TIMEOUT = 8 * MINUTE
+# todo: is there a way to only wait this long if the model is not cached?
+VLLM_DOWNLOAD_TIMEOUT = 15 * MINUTE  # 15 minutes for model download
 VLLM_TOTAL_TIMEOUT = VLLM_STARTUP_TIMEOUT + VLLM_REQUEST_TIMEOUT
-# misc
 
 
 # -----------------------------------------------------------------------------
@@ -41,6 +42,7 @@ VLLM_TOTAL_TIMEOUT = VLLM_STARTUP_TIMEOUT + VLLM_REQUEST_TIMEOUT
     gpu=f"H100:{N_GPU}",
     scaledown_window=15 * MINUTE,
     timeout=VLLM_TOTAL_TIMEOUT,
+    max_containers=1,
     volumes={
         "/root/.cache/huggingface": hf_cache_vol,
         "/root/.cache/vllm": vllm_cache_vol,
@@ -53,7 +55,8 @@ class VLLMServer:
 
     @modal.web_server(
         port=VLLM_PORT,
-        startup_timeout=VLLM_STARTUP_TIMEOUT,
+        # Give extra time if the model needs to download; cheap if cached
+        startup_timeout=VLLM_STARTUP_TIMEOUT + VLLM_DOWNLOAD_TIMEOUT,
         requires_proxy_auth=True,
     )
     def serve(self):
@@ -71,8 +74,12 @@ class VLLMServer:
             str(VLLM_PORT),
             # Qwen2.5-VL specific settings
             "--trust-remote-code",
-            "--limit-mm-per-prompt",
-            "image=5,video=5",
+            "--limit-mm-per-prompt.image",
+            "5",
+            "--limit-mm-per-prompt.video",
+            "5",
+            "--max-model-len",
+            "32768",
         ]
 
         if self.model_revision:
@@ -96,6 +103,7 @@ router_image = modal.Image.debian_slim(python_version="3.12").pip_install(
 ALLOWED_MODELS = [
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2.5-VL-7B-Instruct",
+    "darknoon/svg-stack-filtered-sft-qwen2.5-vl-7b-trl-10k",
 ]
 
 
