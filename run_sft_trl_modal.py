@@ -162,8 +162,10 @@ def upload_model_to_hf(model_path: str, repo_name: str):
 @app.local_entrypoint()
 def main():
     """Run training + (optionally) upload the checkpoint when invoked locally."""
-    MODEL_OUTPUT_PATH = "/workspace/checkpoints/qwen2_5vl-7b/full/sft"
-    HF_REPO_NAME = "darknoon/svg-stack-filtered-sft-qwen2.5-vl-7b-trl"
+    MODEL_OUTPUT_PATH = (
+        "/workspace/checkpoints/qwen2_5vl-7b_sft_svg_filtered/checkpoint-10000"
+    )
+    HF_REPO_NAME = "darknoon/svg-stack-filtered-sft-qwen2.5-vl-7b-trl-10k"
 
     print("Launching distributed SFT job on Modal…")
     train_sft_trl.remote()
