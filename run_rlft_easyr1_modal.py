@@ -15,12 +15,12 @@ trainer_image = (
         "apt-get install -y libcairo2 libpango-1.0-0 libpangocairo-1.0-0 gdk-pixbuf2.0-0 libffi-dev libxml2 libpng-dev zlib1g",
     )
     # install for svg rlrf
-    .pip_install("dreamsim")
+    .pip_install("dreamsim", "cairosvg")
 )
 
 trainer_with_files = (
     trainer_image.run_commands(
-        "git clone https://github.com/hiyouga/EasyR1.git /root/EasyR1"
+        "git clone https://github.com/darknoon/EasyR1.git /root/EasyR1"
     )
     .workdir("/root/EasyR1")
     .add_local_dir("env/svg", "/root/EasyR1/env/svg")
@@ -45,10 +45,9 @@ default_args = {
 }
 
 args_svg_rlrf = {
-    "config": "env/svg/config_svg_rlrf_3b.yaml",
-    "worker": {"actor": {"model": {"model_path": "Qwen/Qwen2.5-VL-3B-Instruct"}}},
+    "config": "env/svg/config_svg_rlrf_7b.yaml",
     "trainer": {
-        "experiment_name": "qwen2_5_vl_3b_svg_rlrf",
+        "experiment_name": "qwen2_5_vl_7b_svg_rlrf",
         "n_gpus_per_node": 8,
     },
 }
@@ -123,4 +122,4 @@ def train_model_easyr1(*arglist):
 
 @app.local_entrypoint()
 def main():
-    train_model_easyr1.remote(args_svg_rlrf)
+    train_model_easyr1.remote("--config", "svg")

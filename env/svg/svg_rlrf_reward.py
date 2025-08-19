@@ -16,7 +16,7 @@ import os
 import tempfile
 import wandb
 from pathlib import Path
-from typing import TypedDict, Optional, Literal
+from typing import TypedDict, Optional, Literal, Any
 import logging
 import traceback
 
@@ -450,7 +450,12 @@ def dreamsim_reward(dreamsim: float) -> float:
     return 1.0 - 2.0 * dreamsim
 
 
-def svg_env(response_str: str, svg_gt: str, thinking: str | None = None, usage: UsageData | None = None) -> PreprocessedResponse | None:
+def svg_env(
+    response_str: str,
+    svg_gt: str,
+    thinking: str | None = None,
+    usage: UsageData | None = None,
+) -> PreprocessedResponse | None:
     """
     Turns a response and ground truth svg (just the content within <answer> tags) into rasterized images for comparison.
     Also computes the format and length rewards.
@@ -525,14 +530,22 @@ class MergedResult(TypedDict):
 
 
 def compute_rewards(
-    p: PreprocessedResponse, image_scores: ImageComparisonResult | None = None
+    p: PreprocessedResponse | None, image_scores: ImageComparisonResult | None = None
 ) -> SVGRewards:
-    try:
-        format_r = format_reward(p.response_str)
-        length_r = length_reward(len(p.response_str), len(expected_response(svg=p.svg)))
-    except Exception as e:
-        print(f"Error in image comparison: {e}")
-        image_scores = None
+    # If we couldn't parse/render the SVG, return minimum rewards
+    if p is None:
+        return SVGRewards(
+            format=0.0,
+            length=MIN_REWARD,
+            l2=MIN_REWARD,
+            l2_canny=MIN_REWARD,
+            dreamsim=MIN_REWARD,
+            dreamsim_canny=MIN_REWARD,
+            overall=MIN_REWARD,
+        )
+
+    format_r = format_reward(p.response_str)
+    length_r = length_reward(len(p.response_str), len(expected_response(svg=p.svg)))
 
     weight_sum = sum(REWARD_WEIGHTS.values())
 
@@ -650,12 +663,18 @@ def write_debug_images(
         print(f"Wrote {tempdir}/images.md")
 
 
-def render_and_compute_rewards(response_str: str, svg_gt: str) -> SVGRewards | None:
+def render_and_compute_rewards(response_str: str, svg_gt: str) -> SVGRewards:
     p = svg_env(response_str, svg_gt)
     image_scores = None
     if p is not None:
         image_scores = get_image_comparator().compare_images(p.svg_im, p.svg_im_gt)
     return compute_rewards(p, image_scores)
+
+
+def compute_rewards_dict(response_str: str, svg_gt: str) -> dict[str, float]:
+    """Compute rewards and return as dict."""
+    rewards = render_and_compute_rewards(response_str, svg_gt)
+    return vars(rewards)
 
 
 def evaluate_and_log_to_wandb(
@@ -792,7 +811,7 @@ if __name__ == "__main__":
             print(f"  SVG GT: {svg_gt}")
             continue
         im = get_image_comparator().compare_images(p.svg_im, p.svg_im_gt)
-        tempdir = tempfile.mkdtemp()
+        tempdir = Path(tempfile.mkdtemp())
         print(f"Writing comparison images to: {tempdir}")
         rewards = compute_rewards(p, im)
         write_debug_images(
