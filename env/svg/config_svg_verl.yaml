@@ -1,0 +1,99 @@
+# We specify all config items not just defaults
+ray_init:
+  num_cpus: null
+  num_gpus: null
+
+data:
+  train_files: darknoon/simple-shapes-svg
+  val_files: darknoon/simple-shapes-svg
+  prompt_key: shape_name
+  answer_key: svg
+  image_key: image
+  max_prompt_length: 1000
+  max_response_length: 1000
+  rollout_batch_size: 128
+  val_batch_size: 1024
+  format_prompt: ./svg_env/svg_format.jinja
+  shuffle: true
+  seed: 1
+  max_pixels: 4194304
+  min_pixels: 262144
+  filter_overlong_prompts: true
+
+algorithm:
+  adv_estimator: grpo
+  disable_kl: true
+  use_kl_loss: false
+
+worker:
+  actor:
+    strategy: fsdp
+    global_batch_size: 128
+    micro_batch_size_per_device_for_update: 4
+    micro_batch_size_per_device_for_experience: 16
+    max_grad_norm: 1.0
+    padding_free: true
+    ulysses_size: 1
+    model:
+      model_path: Qwen/Qwen2.5-VL-7B-Instruct
+      enable_gradient_checkpointing: true
+      trust_remote_code: false
+      freeze_vision_tower: false
+    optim:
+      lr: 1.0e-5
+      weight_decay: 0.01
+      strategy: adamw
+      lr_warmup_ratio: 0.0
+    fsdp:
+      enable_full_shard: true
+      enable_cpu_offload: false
+      enable_rank0_init: true
+    offload:
+      offload_params: true
+      offload_optimizer: true
+  
+  rollout:
+    name: vllm
+    n: 64
+    temperature: 1.1
+    top_p: 0.99
+    seed: 1
+    dtype: bf16
+    gpu_memory_utilization: 0.6
+    enforce_eager: false
+    enable_chunked_prefill: false
+    tensor_parallel_size: 2
+    val_override_config:
+      temperature: 0.5
+      n: 1
+  
+  ref:
+    fsdp:
+      enable_full_shard: true
+      enable_cpu_offload: true
+      enable_rank0_init: true
+    offload:
+      offload_params: false
+  
+  reward:
+    reward_type: sequential
+    reward_function: ./svg_env/svg_rlrf_reward.py
+    reward_function_name: compute_rewards_dict
+
+trainer:
+  total_epochs: 15
+  max_steps: 500
+  project_name: svg_rlrf
+  experiment_name: qwen2_5_vl_7b_svg_grpo_verl
+  logger:
+    - console
+    - wandb
+  nnodes: 1
+  n_gpus_per_node: 8
+  val_freq: 5
+  val_before_train: true
+  val_only: false
+  val_generations_to_log: 3
+  save_freq: 5
+  save_limit: 3
+  save_checkpoint_path: /root/checkpoints/svg_rlrf/qwen2_5_vl_7b_svg_grpo_verl
