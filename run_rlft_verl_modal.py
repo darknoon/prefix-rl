@@ -42,24 +42,28 @@ def train_model_verl():
     import os
     import sys
     import subprocess
-    
+
     os.environ["PYTHONUNBUFFERED"] = "1"
     os.environ["TOKENIZERS_PARALLELISM"] = "true"
     os.environ["NCCL_DEBUG"] = "WARN"
     os.environ["VLLM_LOGGING_LEVEL"] = "WARN"
     os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:False"
-    
+
     # Add the svg_env to Python path for reward function
     sys.path.append("/root/svg_env")
-    
+
     # Run verl training with config file using Hydra syntax
     cmd = [
-        "python3", "-m", "verl.trainer.main_ppo",
-        "--config-path", "/root/svg_env",
-        "--config-name", "config_svg_verl"
+        "python3",
+        "-m",
+        "verl.trainer.main_ppo",
+        "--config-path",
+        "/root/svg_env",
+        "--config-name",
+        "config_svg_verl",
     ]
-    
+
     result = subprocess.run(cmd, check=True)
     return result.returncode
 

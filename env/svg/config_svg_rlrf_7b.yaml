@@ -1,15 +1,15 @@
 data:
-  train_files: darknoon/simple-shapes-svg
-  val_files: darknoon/simple-shapes-svg
+  train_files: darknoon/simple-shapes-svg@train[:90%]
+  val_files: darknoon/simple-shapes-svg@train[90%:]
   prompt_key: shape_name
   answer_key: svg
   image_key: image
-  max_prompt_length: 1000
-  max_response_length: 1000
+  max_prompt_length: 4000
+  max_response_length: 4000
   # "During training, we use the GRPO algorithm with a rollout batch size of 32 images per step"
   rollout_batch_size: 128
-  val_batch_size: 1024
-  format_prompt: ./env/svg/svg_format.jinja
+  val_batch_size: 128  # Reduced from 1024 for testing
+  format_prompt: ./env/svg/svg_format_512.jinja
   override_chat_template: null
   shuffle: true
   seed: 1
@@ -33,11 +33,13 @@ worker:
     ulysses_size: 1
     model:
       # We fine-tune Qwen2.5-VL models (3B and 7B)
-      model_path: Qwen/Qwen2.5-VL-3B-Instruct
-      # model_path: Qwen/Qwen2.5-VL-7B-Instruct
+      # model_path: Qwen/Qwen2.5-VL-3B-Instruct
+      model_path: Qwen/Qwen2.5-VL-7B-Instruct
       enable_gradient_checkpointing: true
       trust_remote_code: false
       freeze_vision_tower: false
+      override_config:
+        torch_dtype: bfloat16
     optim:
       lr: 1.0e-5
       # TODO: we use a learning rate of 1e−5 with 70% decay every 100 steps
@@ -48,6 +50,7 @@ worker:
       enable_full_shard: true
       enable_cpu_offload: false
       enable_rank0_init: true
+      torch_dtype: bf16
     offload:
       offload_params: true  # true: more CPU memory; false: more GPU memory
       offload_optimizer: true  # true: more CPU memory; false: more GPU memory
@@ -73,19 +76,22 @@ worker:
       enable_full_shard: true
       enable_cpu_offload: true  # true: more CPU memory; false: more GPU memory
       enable_rank0_init: true
+      torch_dtype: bf16
     offload:
       offload_params: false
 
   reward:
     reward_type: sequential
     reward_function: ./env/svg/svg_rlrf_reward.py:compute_rewards_dict
+    # Allocate 1 GPU for reward computation (DreamSim needs GPU)
+    num_gpus: 1  
 
 trainer:
   total_epochs: 15
   # "We train for 500 steps in total, covering 16k unique images, significantly fewer than the 1.7M samples used in SVG-SFT"
   max_steps: 500
   project_name: svg_rlrf
-  experiment_name: qwen2_5_vl_3b_svg_grpo
+  experiment_name: qwen2_5_vl_7b_svg_grpo
   logger: ["console", "wandb"]
   nnodes: 1
   n_gpus_per_node: 8

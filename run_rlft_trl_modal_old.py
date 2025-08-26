@@ -151,8 +151,8 @@ class Hyperparameters:
     reward_siglip_weight: float = 0.5
     reward_l2_weight: float = 0.5
     model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
-    # TODO: add a dataset for the training data
-    dataset: str = "trl-lib/tldr"
+    # Dataset to show simple gain in reward
+    dataset: str = "darknoon/simple-shapes-svg"
 
 
 params = Hyperparameters()

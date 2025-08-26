@@ -1,8 +1,18 @@
 {
-  "enableAllProjectMcpServers": false,
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
     "allow": [
-      "mcp__ide__getDiagnostics"
+      "mcp__ide__getDiagnostics",
+      "WebFetch(domain:huggingface.co)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(modal container logs:*)",
+      "Bash(modal container:*)",
+      "Bash(modal app logs:*)"
+    ],
+    "additionalDirectories": [
+      "/Users/andrew/Developer/ML/_others/EasyR1"
     ]
-  }
+  },
+  "enableAllProjectMcpServers": false
 }
