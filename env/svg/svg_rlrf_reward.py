@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TypedDict, Optional, Literal, Any
 import logging
 import traceback
+import time
 
 from dreamsim import dreamsim
 
@@ -193,7 +194,7 @@ class ImageComparator:
         self.device = device
         logger.info("Loading DreamSim model (from dreamsim library)...")
         try:
-            self.dreamsim_model, self.dreamsim_preprocess = dreamsim(
+            self.dreamsim_model, self._dreamsim_preprocess = dreamsim(
                 pretrained=True, device=self.device, cache_dir=dreamsim_cache_dir
             )
             self.dreamsim_model.eval()
@@ -204,6 +205,10 @@ class ImageComparator:
                 "Please ensure the 'dreamsim' library is installed and torch.hub caching is working."
             )
             raise
+    
+    def dreamsim_preprocess(self, image):
+        """Wrapper that ensures preprocessed images are on the correct device."""
+        return self._dreamsim_preprocess(image).to(self.device)
 
     @torch.no_grad()
     def compare_images(
@@ -223,6 +228,11 @@ class ImageComparator:
             # Convert PIL images to RGB
             im = im.convert("RGB")
             im_ref = im_ref.convert("RGB")
+
+            # Resize images to the same size (use the reference image size)
+            target_size = im_ref.size  # (width, height)
+            if im.size != target_size:
+                im = im.resize(target_size, PILImage.Resampling.LANCZOS)
 
             # Convert PIL to tensors [0,1]
             tensor = to_tensor(im).to(self.device)
@@ -260,9 +270,6 @@ class ImageComparator:
                 processed_canny_ref = self.dreamsim_preprocess(
                     pil_canny_ref.convert("RGB")
                 )
-                logger.info(
-                    f"DreamSim Canny input shapes: {processed_canny.shape}, {processed_canny_ref.shape}"
-                )
                 dreamsim_canny_distance = float(
                     self.dreamsim_model(processed_canny, processed_canny_ref)
                 )
@@ -291,9 +298,15 @@ class ImageComparator:
             return None
 
 
-def get_svg_size(tree: cairosvg.parser.Tree) -> tuple[int, int]:
+def get_svg_size(tree: cairosvg.parser.Tree) -> tuple[float, float]:
     width = tree.get("width")
     height = tree.get("height")
+
+    # Handle percentage values - default to 512 for percentages
+    if width and width.endswith("%"):
+        width = "512"
+    if height and height.endswith("%"):
+        height = "512"
 
     if width is None or height is None:
         # Get viewBox if size not specified
@@ -309,7 +322,19 @@ def get_svg_size(tree: cairosvg.parser.Tree) -> tuple[int, int]:
     width = width or "512"
     height = height or "512"
 
-    return float(width), float(height)
+    # Strip any remaining non-numeric characters (like 'px')
+    width = "".join(c for c in str(width) if c.isdigit() or c == ".")
+    height = "".join(c for c in str(height) if c.isdigit() or c == ".")
+
+    # Final fallback if we still don't have valid numbers
+    try:
+        width = float(width) if width else 512.0
+        height = float(height) if height else 512.0
+    except ValueError:
+        width = 512.0
+        height = 512.0
+
+    return width, height
 
 
 def compute_svg_raster_scale(
@@ -376,15 +401,28 @@ def rasterize_svg(
 
 
 def format_reward(predict: str) -> float:
-    pattern = re.compile(r"<think>.*?</think>\s*<answer>.*?</answer>\s{0,3}", re.DOTALL)
+    pattern = re.compile(r"\s{0,3}<think>.*?</think>\s*<answer>.*?</answer>\s{0,3}", re.DOTALL)
     format_match = re.fullmatch(pattern, predict)
     return 1.0 if format_match else 0.0
 
 
+def extract_answer_content(full_response: str) -> str:
+    """Extract content from <answer> tags if present, otherwise return full response."""
+    answer_pattern = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
+    match = re.search(answer_pattern, full_response)
+    if match:
+        return match.group(1)
+    return full_response
+
+
 def extract_svg_text(full_response: str) -> str | None:
+    """Extract the last SVG element from the response."""
     pattern = re.compile(r"<svg.*?</svg>", re.DOTALL)
-    match = re.search(pattern, full_response)
-    return match.group(0).strip() if match else None
+    matches = list(pattern.finditer(full_response))
+    if matches:
+        # Return the last match
+        return matches[-1].group(0).strip()
+    return None
 
 
 image_comparator: ImageComparator | None = None
@@ -394,7 +432,9 @@ image_comparator: ImageComparator | None = None
 def get_image_comparator() -> ImageComparator:
     global image_comparator
     if image_comparator is None:
-        image_comparator = ImageComparator()
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Initializing ImageComparator with device: {device}")
+        image_comparator = ImageComparator(device=device)
     return image_comparator
 
 
@@ -420,6 +460,8 @@ def length_reward(L_pred: float, L_gt: float) -> float:
 @dataclass
 class PreprocessedResponse:
     response_str: str
+    # either the answer or the full response if it doesn't parse correctly
+    answer_str: str
     svg: str
     svg_gt: str
     svg_im: PILImage.Image
@@ -460,15 +502,33 @@ def svg_env(
     Turns a response and ground truth svg (just the content within <answer> tags) into rasterized images for comparison.
     Also computes the format and length rewards.
     """
-    svg = extract_svg_text(response_str)
+    # Extract answer content (from <answer> tags if present, otherwise full response)
+    answer_str = extract_answer_content(response_str)
+    
+    # Extract SVG from the answer content
+    svg = extract_svg_text(answer_str)
     if svg is None:
         return None
-    svg_im_bytes, _, _ = rasterize_svg(svg)
-    svg_im = PILImage.open(io.BytesIO(svg_im_bytes))
-    svg_gt_bytes, _, _ = rasterize_svg(svg_gt)
-    svg_gt_im = PILImage.open(io.BytesIO(svg_gt_bytes))
+
+    try:
+        svg_im_bytes, _, _ = rasterize_svg(svg)
+        svg_im = PILImage.open(io.BytesIO(svg_im_bytes))
+    except Exception as e:
+        logger.error(f"Failed to rasterize generated SVG: {e}")
+        logger.error(f"SVG content: {svg[:200]}...")  # Log first 200 chars
+        return None
+
+    try:
+        svg_gt_bytes, _, _ = rasterize_svg(svg_gt)
+        svg_gt_im = PILImage.open(io.BytesIO(svg_gt_bytes))
+    except Exception as e:
+        logger.error(f"Failed to rasterize ground truth SVG: {e}")
+        logger.error(f"SVG GT content: {svg_gt[:200]}...")
+        return None
+
     return PreprocessedResponse(
         response_str=response_str,
+        answer_str=answer_str,
         svg=svg,
         svg_gt=svg_gt,
         svg_im=svg_im,
@@ -671,9 +731,31 @@ def render_and_compute_rewards(response_str: str, svg_gt: str) -> SVGRewards:
     return compute_rewards(p, image_scores)
 
 
-def compute_rewards_dict(response_str: str, svg_gt: str) -> dict[str, float]:
-    """Compute rewards and return as dict."""
+def compute_rewards_dict(reward_input: dict[str, Any]) -> dict[str, float]:
+    """Compute rewards and return as dict.
+
+    Args:
+        reward_input: Dictionary with keys:
+            - response: The model's response string
+            - ground_truth: The ground truth SVG string
+            - response_length: Length of the response (optional)
+    """
+    start_time = time.time()
+    
+    response_str = reward_input["response"]
+    svg_gt = reward_input["ground_truth"]
+    
+    
     rewards = render_and_compute_rewards(response_str, svg_gt)
+    
+    elapsed = time.time() - start_time
+    if elapsed > 1.0:  # Log if it takes more than 1 second
+        device = get_image_comparator().device
+        logger.warning(f"SVG reward computation took {elapsed * 1000:.0f} ms on {device}")
+    else:
+        device = get_image_comparator().device
+        logger.info(f"SVG reward computation took {elapsed * 1000:.0f} ms on {device}")
+    
     return vars(rewards)
 
 
@@ -798,6 +880,16 @@ if __name__ == "__main__":
                 add_line_breaks=True,
             ),
             random_path_svg(100),
+        ),
+        (
+            "Direct SVG without tags",
+            circle_svg(200),
+            circle_svg(200),
+        ),
+        (
+            "Text before SVG",
+            f"Here is the SVG code: {circle_svg(200)}",
+            circle_svg(200),
         ),
     ]
 
