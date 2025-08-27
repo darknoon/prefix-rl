@@ -757,15 +757,10 @@ def compute_rewards_dict(
     """
     batch_size = len(solution_strs)
 
-    # Log unique data sources for debugging (handle numpy arrays)
-    try:
-        unique_sources = list(set(data_sources)) if data_sources else []
-        logger.info(
-            f"Processing batch of {batch_size} rewards for data_sources: {unique_sources}"
-        )
-    except (TypeError, AttributeError):
-        # Fallback if data_sources is unhashable (e.g. numpy array)
-        logger.info(f"Processing batch of {batch_size} rewards")
+    print(
+        f"compute_rewards_dict: data_sources={data_sources}, solution_strs={solution_strs}, ground_truths={ground_truths}, extra_infos={extra_infos}"
+    )
+    logger.info(f"Processing batch of {batch_size} rewards")
 
     start_time = time.time()
 

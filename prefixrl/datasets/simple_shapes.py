@@ -6,8 +6,9 @@ from .utils import export_parquet_if_changed
 def prepare_for_verl(
     source_dataset: str = "darknoon/simple-shapes-svg",
     output_dir: str | Path = "./data/simple-shapes",
-    train_split: str = "train[:90%]",
-    val_split: str = "train[90%:]",
+    train_split: str = "train[:-128]",
+    # val split is the last 128 examples, so it doesn't take too long to evaluate
+    val_split: str = "train[-128:]",
     num_proc: int = 16,
     force: bool = False,
 ) -> dict[str, str]:
@@ -37,9 +38,18 @@ def prepare_for_verl(
             "prompt": [
                 {
                     "role": "user",
-                    "content": (
-                        "Please recreate this image: <image> as an svg of width 512 and height 512."
-                    ),
+                    # ~125 tokens + image tokens
+                    "content": """\
+You first analyze the input image, think about how to convert it into SVG format, then generate SVG code that would render the image exactly as you see it. Think about the key shapes, paths, and visual elements that need to be represented and their x/y coordinates and any nesting or transformations necessary.
+
+The svg should have width 512 and height 512.
+
+Input image:
+<image>
+
+Formatting:
+Your reasoning process MUST BE enclosed within <think></think> tags, immediately followed by <answer><svg ...></svg></answer> tags containing the final SVG code or you will not receive any credit.
+""",
                 }
             ],
             # Verl wants images as a list
