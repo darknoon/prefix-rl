@@ -20,6 +20,7 @@ from typing import TypedDict, Optional, Literal, Any
 import logging
 import traceback
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from dreamsim import dreamsim
 
@@ -205,7 +206,7 @@ class ImageComparator:
                 "Please ensure the 'dreamsim' library is installed and torch.hub caching is working."
             )
             raise
-    
+
     def dreamsim_preprocess(self, image):
         """Wrapper that ensures preprocessed images are on the correct device."""
         return self._dreamsim_preprocess(image).to(self.device)
@@ -401,7 +402,9 @@ def rasterize_svg(
 
 
 def format_reward(predict: str) -> float:
-    pattern = re.compile(r"\s{0,3}<think>.*?</think>\s*<answer>.*?</answer>\s{0,3}", re.DOTALL)
+    pattern = re.compile(
+        r"\s{0,3}<think>.*?</think>\s*<answer>.*?</answer>\s{0,3}", re.DOTALL
+    )
     format_match = re.fullmatch(pattern, predict)
     return 1.0 if format_match else 0.0
 
@@ -504,7 +507,7 @@ def svg_env(
     """
     # Extract answer content (from <answer> tags if present, otherwise full response)
     answer_str = extract_answer_content(response_str)
-    
+
     # Extract SVG from the answer content
     svg = extract_svg_text(answer_str)
     if svg is None:
@@ -731,32 +734,66 @@ def render_and_compute_rewards(response_str: str, svg_gt: str) -> SVGRewards:
     return compute_rewards(p, image_scores)
 
 
-def compute_rewards_dict(reward_input: dict[str, Any]) -> dict[str, float]:
-    """Compute rewards and return as dict.
+def compute_rewards_dict(reward_input: list[dict[str, Any]]) -> list[dict[str, float]]:
+    """Compute rewards for a batch of inputs.
 
     Args:
-        reward_input: Dictionary with keys:
+        reward_input: List of dictionaries with keys:
             - response: The model's response string
             - ground_truth: The ground truth SVG string
             - response_length: Length of the response (optional)
+
+    Returns:
+        List of reward dictionaries
     """
+    if not reward_input:
+        return []
+
+    batch_size = len(reward_input)
+    logger.info(f"Processing batch of {batch_size} rewards")
     start_time = time.time()
-    
-    response_str = reward_input["response"]
-    svg_gt = reward_input["ground_truth"]
-    
-    
-    rewards = render_and_compute_rewards(response_str, svg_gt)
-    
+
+    # Step 1: Parallel rendering of SVGs to images
+    preprocessed_responses = []
+
+    def render_single(item):
+        try:
+            return svg_env(item["response"], item["ground_truth"])
+        except Exception as e:
+            logger.error(f"Error rendering SVG: {e}")
+            return None
+
+    # Use ThreadPoolExecutor for parallel I/O-bound rendering
+    with ThreadPoolExecutor(max_workers=min(batch_size, 16)) as executor:
+        futures = [executor.submit(render_single, item) for item in reward_input]
+        # Preserve order
+        preprocessed_responses = [future.result() for future in futures]
+
+    # Step 2: Batch compute image comparisons
+    comparator = get_image_comparator()
+    image_scores_list = []
+
+    for p in preprocessed_responses:
+        if p is not None:
+            image_scores = comparator.compare_images(p.svg_im, p.svg_im_gt)
+            image_scores_list.append(image_scores)
+        else:
+            image_scores_list.append(None)
+
+    # Step 3: Compute rewards for each item
+    rewards_list = []
+    for p, image_scores in zip(preprocessed_responses, image_scores_list):
+        rewards = compute_rewards(p, image_scores)
+        rewards_list.append(vars(rewards))
+
     elapsed = time.time() - start_time
-    if elapsed > 1.0:  # Log if it takes more than 1 second
-        device = get_image_comparator().device
-        logger.warning(f"SVG reward computation took {elapsed * 1000:.0f} ms on {device}")
-    else:
-        device = get_image_comparator().device
-        logger.info(f"SVG reward computation took {elapsed * 1000:.0f} ms on {device}")
-    
-    return vars(rewards)
+    avg_time = (elapsed * 1000) / batch_size
+    device = comparator.device
+    logger.info(
+        f"Batch SVG reward computation took {elapsed * 1000:.0f} ms total ({avg_time:.1f} ms/item) on {device}"
+    )
+
+    return rewards_list
 
 
 def evaluate_and_log_to_wandb(

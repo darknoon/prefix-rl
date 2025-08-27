@@ -83,8 +83,8 @@ worker:
   reward:
     reward_type: sequential
     reward_function: ./env/svg/svg_rlrf_reward.py:compute_rewards_dict
-    # Allocate 1 GPU for reward computation (DreamSim needs GPU)
-    num_gpus: 1  
+    # Use CPU for reward computation to avoid Ray GPU allocation issues
+    num_gpus: 0  
 
 trainer:
   total_epochs: 15

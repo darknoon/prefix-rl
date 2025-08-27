@@ -1,24 +1,36 @@
-# We specify all config items not just defaults
-ray_init:
-  num_cpus: null
-  num_gpus: null
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+ray_kwargs:
+  ray_init:
+    runtime_env:
+      env_vars:
+        DREAMSIM_CACHE_DIR: "/root/.cache/torch"
 
 data:
-  train_files: darknoon/simple-shapes-svg
-  val_files: darknoon/simple-shapes-svg
-  prompt_key: shape_name
-  answer_key: svg
-  image_key: image
+  # After prepare_svg_data(), parquet lives in /workspace/data/<org>/<name>/
+  train_files: /workspace/data/simple-shapes/train.parquet
+  val_files: /workspace/data/simple-shapes/val.parquet
+  prompt_key: prompt
+  answer_key: completion
+  image_key: images
+  reward_fn_key: data_source
+  return_raw_chat: true  # Using chat format with messages
   max_prompt_length: 1000
   max_response_length: 1000
   rollout_batch_size: 128
   val_batch_size: 1024
-  format_prompt: ./svg_env/svg_format.jinja
   shuffle: true
   seed: 1
   max_pixels: 4194304
   min_pixels: 262144
-  filter_overlong_prompts: true
+  filter_overlong_prompts: false  # Disabled to avoid multiprocessing deadlock
+  sampler: null
 
 algorithm:
   adv_estimator: grpo
@@ -61,18 +73,14 @@ actor_rollout_ref:
     fsdp_config:
       param_offload: true
 
-reward:
-  reward_function: ./svg_env/svg_rlrf_reward.py:compute_rewards_dict
-
 critic:
   enable: false
-  strategy: fsdp
 
 reward_model:
   enable: false
 
 custom_reward_function:
-  path: ./svg_env/svg_rlrf_reward.py
+  path: ./env/svg/svg_rlrf_reward.py
   name: compute_rewards_dict
 
 trainer:

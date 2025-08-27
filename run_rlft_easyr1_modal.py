@@ -16,7 +16,7 @@ trainer_image = (
         "apt-get install -y libcairo2 libpango-1.0-0 libpangocairo-1.0-0 gdk-pixbuf2.0-0 libffi-dev libxml2 libpng-dev zlib1g",
     )
     # install for svg rlrf
-    .pip_install("dreamsim", "cairosvg")
+    .pip_install("dreamsim", "cairosvg", "tqdm")
 )
 
 trainer_with_files = (
@@ -127,8 +127,8 @@ def train_model_easyr1(*arglist):
 
 @app.function(
     image=trainer_with_files,
-    gpu="H100",
-    timeout=10 * MINUTE,
+    cpu=2,  # CPU only, no GPU needed
+    timeout=30 * MINUTE,  # Increased timeout for full benchmark
     volumes={
         "/root/.cache/huggingface": hf_cache_vol,
         "/root/.cache/torch": torch_hub_cache_vol,
@@ -138,126 +138,72 @@ def benchmark_reward():
     import sys
     import os
     import time
+    import numpy as np
+    from tqdm import tqdm
 
     sys.path.insert(0, "/root/EasyR1")
-    
-    # Create cache directory if it doesn't exist
     os.makedirs("/root/.cache/torch", exist_ok=True)
     os.environ["DREAMSIM_CACHE_DIR"] = "/root/.cache/torch"
 
     from env.svg.svg_rlrf_reward import compute_rewards_dict, expected_response
     import torch
-    import numpy as np
 
-    print(f"CUDA available: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
-        print(f"CUDA device: {torch.cuda.get_device_name(0)}")
+    print(f"Device: {'GPU - ' + torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
 
     def circle_svg(r: float) -> str:
         return f"<svg width='512' height='512'><circle cx='256' cy='256' r='{r:.0f}' stroke='black' stroke-width='3' fill='red' /></svg>"
-
-    # Warmup
-    print("\n=== Warmup ===")
-    for i in range(3):
-        response = expected_response(
-            thinking="Test", svg=circle_svg(200), add_line_breaks=True
-        )
-        reward_input = {"response": response, "ground_truth": circle_svg(200)}
-        start = time.perf_counter()
-        rewards = compute_rewards_dict(reward_input)
-        elapsed = time.perf_counter() - start
-        print(f"Warmup {i + 1}: {elapsed * 1000:.1f} ms")
-
-    # Benchmark
-    print("\n=== Benchmark (100 iterations) ===")
-    test_cases = [
-        ("Identical", circle_svg(200), circle_svg(200)),
-        ("Different", circle_svg(180), circle_svg(200)),
-    ]
-
-    for name, svg_pred, svg_gt in test_cases:
-        print(f"\n{name}:")
-        response = expected_response(
-            thinking="Test", svg=svg_pred, add_line_breaks=True
-        )
-        reward_input = {"response": response, "ground_truth": svg_gt}
-
+    
+    def create_batch(size: int, base_radius: int = 200) -> list:
+        """Create a batch of test inputs with varying circle radii."""
+        return [
+            {
+                "response": expected_response(
+                    thinking=f"Drawing circle {i}", 
+                    svg=circle_svg(base_radius + i * 5), 
+                    add_line_breaks=True
+                ),
+                "ground_truth": circle_svg(base_radius)
+            }
+            for i in range(size)
+        ]
+    
+    def benchmark_batch(batch_size: int, iterations: int = 10) -> dict:
+        """Benchmark a specific batch size."""
+        batch = create_batch(batch_size)
+        
+        # Warmup
+        for _ in tqdm(range(2), desc=f"Warmup (batch={batch_size})", leave=False):
+            compute_rewards_dict(batch)
+        
+        # Benchmark
         times = []
-        for i in range(100):
+        for _ in tqdm(range(iterations), desc=f"Benchmark (batch={batch_size})", leave=False):
             start = time.perf_counter()
-            rewards = compute_rewards_dict(reward_input)
-            elapsed = time.perf_counter() - start
-            times.append(elapsed * 1000)
+            rewards = compute_rewards_dict(batch)
+            times.append((time.perf_counter() - start) * 1000)
+        
+        return {
+            "batch_size": batch_size,
+            "total_mean": np.mean(times),
+            "total_p50": np.percentile(times, 50),
+            "per_item_mean": np.mean(times) / batch_size,
+            "per_item_p50": np.percentile(times, 50) / batch_size,
+            "num_rewards": len(rewards)
+        }
 
-        print(f"  Mean: {np.mean(times):.1f} ms")
-        print(f"  P50: {np.percentile(times, 50):.1f} ms")
-        print(f"  P95: {np.percentile(times, 95):.1f} ms")
-
-    # Detailed profiling
-    print("\n=== Profiling ===")
-    from env.svg import svg_rlrf_reward
-    import functools
-
-    timing_results = {}
-
-    def time_function(name):
-        def decorator(func):
-            @functools.wraps(func)
-            def wrapper(*args, **kwargs):
-                start = time.perf_counter()
-                result = func(*args, **kwargs)
-                elapsed = time.perf_counter() - start
-                if name not in timing_results:
-                    timing_results[name] = []
-                timing_results[name].append(elapsed * 1000)
-                return result
-
-            return wrapper
-
-        return decorator
-
-    # Patch functions
-    svg_rlrf_reward.svg_env = time_function("svg_env")(svg_rlrf_reward.svg_env)
-    svg_rlrf_reward.rasterize_svg = time_function("rasterize_svg")(
-        svg_rlrf_reward.rasterize_svg
-    )
-    svg_rlrf_reward.canny = time_function("canny")(svg_rlrf_reward.canny)
-
-    comparator = svg_rlrf_reward.get_image_comparator()
-    comparator.compare_images = time_function("compare_images")(
-        comparator.compare_images
-    )
-
-    # Time DreamSim calls
-    original_model = comparator.dreamsim_model
-
-    def timed_dreamsim(img1, img2):
-        start = time.perf_counter()
-        result = original_model(img1, img2)
-        elapsed = time.perf_counter() - start
-        timing_results.setdefault("dreamsim_forward", []).append(elapsed * 1000)
-        return result
-
-    comparator.dreamsim_model = timed_dreamsim
-
-    response = expected_response(
-        thinking="Profile", svg=circle_svg(200), add_line_breaks=True
-    )
-    reward_input = {"response": response, "ground_truth": circle_svg(200)}
-
-    for i in range(10):
-        timing_results.clear()
-        rewards = compute_rewards_dict(reward_input)
-
-    print("\nFunction timing (last run):")
-    for func_name, times in timing_results.items():
-        if times:
-            print(f"  {func_name}: {times[-1]:.1f} ms")
-
-    print(
-        f"  TOTAL: {sum(times[-1] for times in timing_results.values() if times):.1f} ms"
-    )
-    return "Done"
+    # Test batch size 32 only
+    print("\n" + "="*50)
+    print("BATCH PROCESSING PERFORMANCE (Batch Size: 32)")
+    print("="*50)
+    
+    result = benchmark_batch(32, iterations=4)
+    
+    print(f"\nResults for Batch Size: {result['batch_size']}")
+    print(f"  Total time:    {result['total_mean']:6.1f} ms (mean), {result['total_p50']:6.1f} ms (p50)")
+    print(f"  Per item time: {result['per_item_mean']:6.1f} ms (mean), {result['per_item_p50']:6.1f} ms (p50)")
+    print(f"  Throughput:    {1000 / result['per_item_mean']:6.1f} items/sec")
+    
+    return "Benchmark completed"
 
 
 @app.local_entrypoint()
