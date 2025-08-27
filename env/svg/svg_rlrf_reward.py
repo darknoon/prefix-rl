@@ -734,7 +734,9 @@ def render_and_compute_rewards(response_str: str, svg_gt: str) -> SVGRewards:
     return compute_rewards(p, image_scores)
 
 
-def compute_rewards_dict(reward_input: list[dict[str, Any]]) -> list[dict[str, float]]:
+def compute_rewards_dict(
+    reward_input: list[dict[str, Any]], **kwargs
+) -> list[dict[str, float]]:
     """Compute rewards for a batch of inputs.
 
     Args:
@@ -742,6 +744,7 @@ def compute_rewards_dict(reward_input: list[dict[str, Any]]) -> list[dict[str, f
             - response: The model's response string
             - ground_truth: The ground truth SVG string
             - response_length: Length of the response (optional)
+        **kwargs: Additional keyword arguments from VERL (e.g., data_source)
 
     Returns:
         List of reward dictionaries
@@ -750,7 +753,13 @@ def compute_rewards_dict(reward_input: list[dict[str, Any]]) -> list[dict[str, f
         return []
 
     batch_size = len(reward_input)
-    logger.info(f"Processing batch of {batch_size} rewards")
+    # Log data source if provided for debugging
+    if "data_source" in kwargs:
+        logger.info(
+            f"Processing batch of {batch_size} rewards for data_source: {kwargs['data_source']}"
+        )
+    else:
+        logger.info(f"Processing batch of {batch_size} rewards")
     start_time = time.time()
 
     # Step 1: Parallel rendering of SVGs to images
