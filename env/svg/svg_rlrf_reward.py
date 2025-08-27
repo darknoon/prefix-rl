@@ -735,46 +735,54 @@ def render_and_compute_rewards(response_str: str, svg_gt: str) -> SVGRewards:
 
 
 def compute_rewards_dict(
-    reward_input: list[dict[str, Any]], **kwargs
+    data_sources: list[str],
+    solution_strs: list[str],
+    ground_truths: list[str],
+    extra_infos: list[Any],
+    **kwargs,
 ) -> list[dict[str, float]]:
-    """Compute rewards for a batch of inputs.
+    """Compute rewards for a batch of SVG generation inputs.
+
+    Following VERL's batch reward function pattern (like math_batch.py).
 
     Args:
-        reward_input: List of dictionaries with keys:
-            - response: The model's response string
-            - ground_truth: The ground truth SVG string
-            - response_length: Length of the response (optional)
-        **kwargs: Additional keyword arguments from VERL (e.g., data_source)
+        data_sources: List of data source identifiers
+        solution_strs: List of model response strings (containing SVG)
+        ground_truths: List of ground truth SVG strings
+        extra_infos: List of extra info (unused for SVG)
+        **kwargs: Additional keyword arguments from VERL (unused)
 
     Returns:
-        List of reward dictionaries
+        List of reward dictionaries with 'score' and component scores
     """
-    if not reward_input:
-        return []
+    batch_size = len(solution_strs)
 
-    batch_size = len(reward_input)
-    # Log data source if provided for debugging
-    if "data_source" in kwargs:
+    # Log unique data sources for debugging (handle numpy arrays)
+    try:
+        unique_sources = list(set(data_sources)) if data_sources else []
         logger.info(
-            f"Processing batch of {batch_size} rewards for data_source: {kwargs['data_source']}"
+            f"Processing batch of {batch_size} rewards for data_sources: {unique_sources}"
         )
-    else:
+    except (TypeError, AttributeError):
+        # Fallback if data_sources is unhashable (e.g. numpy array)
         logger.info(f"Processing batch of {batch_size} rewards")
+
     start_time = time.time()
 
     # Step 1: Parallel rendering of SVGs to images
-    preprocessed_responses = []
-
-    def render_single(item):
+    def render_single(solution_str, ground_truth):
         try:
-            return svg_env(item["response"], item["ground_truth"])
+            return svg_env(solution_str, ground_truth)
         except Exception as e:
             logger.error(f"Error rendering SVG: {e}")
             return None
 
     # Use ThreadPoolExecutor for parallel I/O-bound rendering
     with ThreadPoolExecutor(max_workers=min(batch_size, 16)) as executor:
-        futures = [executor.submit(render_single, item) for item in reward_input]
+        futures = [
+            executor.submit(render_single, sol_str, gt)
+            for sol_str, gt in zip(solution_strs, ground_truths)
+        ]
         # Preserve order
         preprocessed_responses = [future.result() for future in futures]
 
@@ -793,7 +801,10 @@ def compute_rewards_dict(
     rewards_list = []
     for p, image_scores in zip(preprocessed_responses, image_scores_list):
         rewards = compute_rewards(p, image_scores)
-        rewards_list.append(vars(rewards))
+        # Convert to dict and ensure 'score' key exists for VERL
+        reward_dict = vars(rewards)
+        reward_dict["score"] = rewards.overall  # VERL expects 'score' key
+        rewards_list.append(reward_dict)
 
     elapsed = time.time() - start_time
     avg_time = (elapsed * 1000) / batch_size
