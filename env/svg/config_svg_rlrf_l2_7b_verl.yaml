@@ -17,14 +17,14 @@ data:
   train_files: /workspace/data/simple-shapes/train.parquet
   val_files: /workspace/data/simple-shapes/val.parquet
   prompt_key: prompt
-  answer_key: completion
   image_key: images
   reward_fn_key: data_source
   return_raw_chat: true  # Using chat format with messages
   max_prompt_length: 1000
+  # svgs for this dataset should be very short
   max_response_length: 1000
-  rollout_batch_size: 128
-  val_batch_size: 1024
+  train_batch_size: 16
+  rollout_batch_size: 64
   shuffle: true
   seed: 1
   max_pixels: 4194304
@@ -48,7 +48,7 @@ actor_rollout_ref:
     strategy: fsdp
     optim:
       lr: 1.0e-5
-    ppo_mini_batch_size: 128
+    ppo_mini_batch_size: 16
     ppo_micro_batch_size_per_gpu: 4
     use_kl_loss: false
     fsdp_config:
@@ -78,9 +78,12 @@ critic:
 
 reward_model:
   enable: false
+  # Use batch reward manager to speed up reward computation (svg reward)
+  reward_manager: "batch"
 
 custom_reward_function:
-  path: ./env/svg/svg_rlrf_reward.py
+  # Use remote Modal GPU service for faster reward computation
+  path: ./env/svg/svg_rlrf_l2.py
   name: compute_rewards_dict
 
 trainer:
