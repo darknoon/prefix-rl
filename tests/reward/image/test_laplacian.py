@@ -1,4 +1,4 @@
-"""Tests for Laplacian pyramid functionality."""
+"""Tests for Laplacian pyramid specific functionality."""
 
 import pytest
 from prefixrl.reward.image.laplacian import (
@@ -13,40 +13,6 @@ from prefixrl.reward.svg.shapes import make_circle
 def rasterize(svg: str):
     img, _, _ = rasterize_svg(svg)
     return img
-
-
-def test_laplacian_identical_images():
-    """Test Laplacian pyramid distance for identical images."""
-    svg = make_circle(
-        cx=256, cy=256, r=100, fill="red", stroke="black", background="gray"
-    )
-    d = compare_images_by_laplacian(rasterize(svg), rasterize(svg))
-    assert d < 1e-6
-
-
-def test_laplacian_shifted_circles():
-    """Test Laplacian pyramid distance for slightly shifted images."""
-    svg_center = make_circle(
-        cx=256, cy=256, r=100, fill="red", stroke="black", background="gray"
-    )
-    svg_shifted = make_circle(
-        cx=236, cy=256, r=100, fill="red", stroke="black", background="gray"
-    )
-    d = compare_images_by_laplacian(rasterize(svg_center), rasterize(svg_shifted))
-    assert 0.001 < d < 1.0
-
-
-def test_laplacian_bgcolor_gray_vs_white():
-    """Test that changing background color from #eee to white has minimal effect on Laplacian distance."""
-    svg_gray = make_circle(
-        cx=256, cy=256, r=100, fill="red", stroke="black", background="gray"
-    )
-    svg_white = make_circle(
-        cx=256, cy=256, r=100, fill="red", stroke="black", background="white"
-    )
-    d = compare_images_by_laplacian(rasterize(svg_gray), rasterize(svg_white))
-    # The distance should be small, but not zero (since #eee != white)
-    assert 0.01 < d < 1.0
 
 
 @pytest.mark.parametrize("levels", [3, 4, 6, 8])
@@ -70,8 +36,8 @@ def test_pyramid_levels(levels):
 
 
 @pytest.mark.parametrize("mode", ["zeros", "reflect", "replicate", "circular"])
-def test_padding_modes(mode):
-    """Test different padding modes work correctly."""
+def test_laplacian_padding_modes(mode):
+    """Test different padding modes work correctly for Laplacian."""
     svg = make_circle(cx=256, cy=256, r=100, fill="green")
     img = rasterize(svg)
 
