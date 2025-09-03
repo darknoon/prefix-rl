@@ -10,6 +10,7 @@ if sys.platform == "darwin":  # macOS
         if homebrew_lib not in current_path:
             os.environ["DYLD_LIBRARY_PATH"] = f"{homebrew_lib}:{current_path}"
 
+
 import cairosvg.parser
 import cairosvg.surface
 
@@ -30,7 +31,7 @@ MIN_REWARD = -1.0
 REWARD_WEIGHTS = {
     "format": 1.0,
     "length": 1.0,
-    "l2": 1.0,
+    "l2": 1000.0,
 }
 REWARD_WEIGHT_SUM = sum(REWARD_WEIGHTS.values())
 
@@ -242,7 +243,7 @@ def safe_rasterize_svg(svg_content: str) -> PILImage.Image | None:
         svg_im_bytes, _, _ = rasterize_svg(svg_content)
         return PILImage.open(io.BytesIO(svg_im_bytes))
     except Exception as e:
-        logger.warning(f"Failed to rasterize SVG: {e}")
+        logger.warning(f"Failed to rasterize SVG: {e}\n{svg_content[:500]}")
         return None
 
 

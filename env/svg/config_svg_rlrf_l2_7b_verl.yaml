@@ -90,7 +90,7 @@ trainer:
   total_epochs: 15
   max_steps: 500
   project_name: svg_rlrf
-  experiment_name: qwen2_5_vl_7b_svg_grpo_verl
+  experiment_name: qwen2_5_vl_7b_svg_l2_grpo_verl
   logger:
     - console
     - wandb
@@ -102,4 +102,6 @@ trainer:
   val_generations_to_log: 3
   save_freq: 5
   save_limit: 3
-  save_checkpoint_path: /root/checkpoints/svg_rlrf/qwen2_5_vl_7b_svg_grpo_verl
+  save_checkpoint_path: /workspace/checkpoints/svg_rlrf/qwen2_5_vl_7b_svg_grpo_verl
+  rollout_data_dir: /workspace/generated/rollouts
+  validation_data_dir: /workspace/generated/validation

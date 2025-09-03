@@ -220,7 +220,13 @@ def test_reward_service():
     return rewards
 
 
+@app.local_entrypoint()
 def main():
+    prepare_svg_data.remote()
+    train_model_verl.remote()
+
+
+def pymain():
     import argparse
 
     args = argparse.ArgumentParser()
@@ -239,4 +245,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    pymain()

@@ -48,7 +48,7 @@ Input image:
 <image>
 
 Formatting:
-Your reasoning process MUST BE enclosed within <think></think> tags, immediately followed by <answer><svg ...></svg></answer> tags containing the final SVG code or you will not receive any credit.
+Your reasoning process MUST BE enclosed within <think></think> tags, immediately followed by <answer><svg ...></svg></answer> tags containing the final SVG code. No other text or backticks are permitted, or you will not receive any credit for your answer.
 """,
                 }
             ],
