@@ -28,3 +28,9 @@ dependencies = [
     "trl>=0.19.1",
     "wandb>=0.21.0",
 ]
+
+[dependency-groups]
+dev = ["pytest>=8.4.1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
