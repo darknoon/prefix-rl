@@ -17,11 +17,7 @@ logger = logging.getLogger(__name__)
 
 class DreamSimComparator:
     """
-    DreamSim-based image comparator for perceptual similarity.
-
-    This class wraps the DreamSim model for computing perceptual distances
-    between images, which correlates better with human perception than
-    pixel-based metrics like L2.
+    This caches a DreamSim model and preprocessor for reuse.
     """
 
     def __init__(
@@ -70,45 +66,29 @@ class DreamSimComparator:
         """
         return self._dreamsim_preprocess(image).to(self.device)
 
+    def __call__(self, image: Image.Image, reference: Image.Image) -> float:
+        return self.compare_images(image, reference)
+
     @torch.no_grad()
-    def compare_images(self, img1: Image.Image, img2: Image.Image) -> float:
-        """
-        Compute DreamSim perceptual distance between two PIL images.
+    def compare_images(self, image: Image.Image, reference: Image.Image) -> float:
+        # Prepare images for fair comparison
+        image, reference = resize_to_reference_image(image, reference, mode="RGB")
 
-        Args:
-            img1: First image
-            img2: Second image (reference)
+        # Resize to 224x224 and convert to tensors
+        processed_img1 = self.preprocess(image)
+        processed_img2 = self.preprocess(reference)
 
-        Returns:
-            DreamSim distance (lower values indicate more similar images)
-        """
-        try:
-            # Prepare images for fair comparison
-            img1, img2 = resize_to_reference_image(img1, img2, mode="RGB")
+        # Compute distance
+        distance = float(self.dreamsim_model(processed_img1, processed_img2))
 
-            # Preprocess images
-            processed_img1 = self.preprocess(img1)
-            processed_img2 = self.preprocess(img2)
-
-            # Compute distance
-            distance = float(self.dreamsim_model(processed_img1, processed_img2))
-
-            return distance
-
-        except Exception as e:
-            logger.error(f"DreamSim comparison failed: {e}")
-            logger.error(f"Image sizes: {img1.size}, {img2.size}")
-            logger.error(f"Image modes: {img1.mode}, {img2.mode}")
-            raise
+        return distance
 
 
-# Global instance for reuse
-_dreamsim_comparator: Optional[DreamSimComparator] = None
+# Global instance to cache the comparator
+_model: Optional[DreamSimComparator] = None
 
 
-def get_dreamsim_comparator(
-    device: Optional[str] = None, cache_dir: Optional[str] = None
-) -> DreamSimComparator:
+def get_dreamsim_comparator(device: Optional[str] = None) -> DreamSimComparator:
     """
     Get or create a global DreamSim comparator instance.
 
@@ -119,16 +99,21 @@ def get_dreamsim_comparator(
     Returns:
         DreamSim comparator instance
     """
-    global _dreamsim_comparator
+    global _model
 
-    if _dreamsim_comparator is None:
+    if _model is None:
         if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
 
         logger.info(f"Initializing DreamSim comparator with device: {device}")
-        _dreamsim_comparator = DreamSimComparator(device=device, cache_dir=cache_dir)
+        _model = DreamSimComparator(device=device)
 
-    return _dreamsim_comparator
+    return _model
 
 
 @torch.no_grad()
@@ -145,8 +130,7 @@ def compare_images_by_dreamsim(img1: Image.Image, img2: Image.Image) -> float:
     Returns:
         DreamSim distance (lower values indicate more similar images)
     """
-    comparator = get_dreamsim_comparator()
-    return comparator.compare_images(img1, img2)
+    return get_dreamsim_comparator()(img1, img2)
 
 
 def dreamsim_reward(dreamsim_distance: float) -> float:
