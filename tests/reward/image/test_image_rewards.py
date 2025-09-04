@@ -1,8 +1,9 @@
-"""Tests for general image comparison functionality (L2, Laplacian, and DreamSim)."""
+"""Tests for general image comparison functionality (L2, Laplacian, Gaussian, and DreamSim)."""
 
 import pytest
 from prefixrl.reward.image.laplacian import compare_images_by_laplacian
 from prefixrl.reward.image.l2 import compare_images_by_l2
+from prefixrl.reward.image.gaussian import compare_images_by_gaussian
 from prefixrl.reward.image.dreamsim import compare_images_by_dreamsim
 from prefixrl.reward.svg.cairosvg import rasterize_svg
 from prefixrl.reward.svg.shapes import make_circle
@@ -11,6 +12,7 @@ from prefixrl.reward.svg.shapes import make_circle
 all_compare_funcs = [
     compare_images_by_l2,
     compare_images_by_laplacian,
+    compare_images_by_gaussian,
     compare_images_by_dreamsim,
 ]
 
