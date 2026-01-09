@@ -751,9 +751,12 @@ async def anthropic_client(
     if "claude-sonnet-4" in model_name or "claude-4" in model_name:
         thinking_config = {"type": "enabled", "budget_tokens": thinking_budget}
 
+    # max_tokens must be greater than thinking.budget_tokens when thinking is enabled
+    max_tokens = thinking_budget + 4000 if thinking_config else 4000
+
     message_params = {
         "model": model_name,
-        "max_tokens": 4000,
+        "max_tokens": max_tokens,
         "temperature": temperature,
         "messages": [
             {
@@ -786,7 +789,7 @@ async def anthropic_client(
         if content_block.type == "text":
             response_text = content_block.text
         elif content_block.type == "thinking":
-            thinking_text = content_block.text
+            thinking_text = content_block.thinking
 
     usage = UsageData(
         prompt_tokens=message.usage.input_tokens if message.usage else None,
