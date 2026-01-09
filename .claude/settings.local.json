@@ -8,8 +8,14 @@
       "WebFetch(domain:github.com)",
       "Bash(modal container logs:*)",
       "Bash(modal container:*)",
-      "Bash(modal app logs:*)"
+      "Bash(modal app logs:*)",
+      "Read(//Users/andrew/Developer/ML/_others/verl/verl/trainer/**)",
+      "Read(//Users/andrew/Developer/ML/_others/verl/**)"
     ],
+    "env": {
+      "BASH_DEFAULT_TIMEOUT_MS": "600000",
+      "BASH_MAX_TIMEOUT_MS": "5400000"
+    },
     "additionalDirectories": [
       "/Users/andrew/Developer/ML/_others/EasyR1"
     ]
