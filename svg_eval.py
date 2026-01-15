@@ -34,6 +34,7 @@ import asyncio
 import json
 import logging
 import shutil
+import re
 
 load_dotenv()
 
@@ -129,6 +130,32 @@ def response_output_text(response) -> str:
 
 def supports_responses_temperature(model_name: str) -> bool:
     return "codex" not in model_name
+
+
+def infer_openai_client_variant(model_name: str) -> str:
+    legacy_chat_patterns = (
+        r"^gpt-3\.5",
+        r"^gpt-4(?!o)",
+        r"^gpt-4-",
+        r"^(text|code)-",
+        r"^(davinci|curie|babbage|ada)(-|$)",
+    )
+    if any(re.search(pattern, model_name) for pattern in legacy_chat_patterns):
+        return "openai"
+    return "openai-responses"
+
+
+def infer_client_from_model(model_name: str) -> str:
+    model = model_name.strip()
+    client_patterns = (
+        (r"^claude", "anthropic"),
+        (r"^gemini", "google"),
+        (r"^openrouter/", "openrouter"),
+    )
+    for pattern, client in client_patterns:
+        if re.search(pattern, model):
+            return client
+    return infer_openai_client_variant(model)
 
 
 async def openai_client(
@@ -961,7 +988,15 @@ parser.add_argument(
     "--client",
     type=str,
     default="openai-responses",
-    choices=["openai", "openai-responses", "anthropic", "google", "vllm", "openrouter"],
+    choices=[
+        "auto",
+        "openai",
+        "openai-responses",
+        "anthropic",
+        "google",
+        "vllm",
+        "openrouter",
+    ],
     help="Which client/model to use.",
 )
 parser.add_argument(
@@ -1018,6 +1053,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     dataset_config = datasets[args.dataset]
+
+    if args.client == "auto":
+        args.client = infer_client_from_model(args.model_name)
 
     if args.client == "openai":
         client_fn = partial(
