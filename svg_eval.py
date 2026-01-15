@@ -987,7 +987,7 @@ parser.add_argument(
 parser.add_argument(
     "--client",
     type=str,
-    default="openai-responses",
+    default="auto",
     choices=[
         "auto",
         "openai",
