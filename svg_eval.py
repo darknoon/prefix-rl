@@ -137,13 +137,21 @@ async def openai_client(
     model_name: str = "gpt-4.1-mini",
     temperature: float = 1.0,
 ) -> tuple[str, str | None, UsageData]:
-    """OpenAI client using Responses API by default."""
-    return await openai_reasoning_client(
-        prompt,
-        image,
-        model_name=model_name,
+    client = AsyncOpenAI()
+    response = await client.chat.completions.create(
+        model=model_name,
+        messages=prompt_to_messages(prompt, image),
         temperature=temperature,
     )
+
+    usage = UsageData(
+        prompt_tokens=response.usage.prompt_tokens if response.usage else None,
+        completion_tokens=response.usage.completion_tokens if response.usage else None,
+        reasoning_tokens=None,
+        total_tokens=response.usage.total_tokens if response.usage else None,
+    )
+
+    return response.choices[0].message.content, None, usage
 
 
 async def openai_reasoning_client(
@@ -952,7 +960,7 @@ parser.add_argument(
 parser.add_argument(
     "--client",
     type=str,
-    default="openai",
+    default="openai-responses",
     choices=["openai", "openai-responses", "anthropic", "google", "vllm", "openrouter"],
     help="Which client/model to use.",
 )
