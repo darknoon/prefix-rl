@@ -154,6 +154,13 @@ def infer_openai_client_variant(model_name: str) -> str:
 
 def infer_client_from_model(model_name: str) -> str:
     model = model_name.strip()
+    openrouter_prefixes = (
+        "openai/",
+        "anthropic/",
+        "google/",
+    )
+    if any(model.startswith(prefix) for prefix in openrouter_prefixes):
+        return "openrouter"
     client_patterns = (
         (r"^claude", "anthropic"),
         (r"^gemini", "google"),
