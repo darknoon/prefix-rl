@@ -135,8 +135,15 @@ def supports_responses_temperature(model_name: str) -> bool:
 def infer_openai_client_variant(model_name: str) -> str:
     legacy_chat_patterns = (
         r"^gpt-3\.5",
-        r"^gpt-4(?!o)",
-        r"^gpt-4-",
+        r"^gpt-4$",
+        r"^gpt-4-0314$",
+        r"^gpt-4-0613$",
+        r"^gpt-4-32k$",
+        r"^gpt-4-32k-0314$",
+        r"^gpt-4-32k-0613$",
+        r"^gpt-4-1106-preview$",
+        r"^gpt-4-0125-preview$",
+        r"^gpt-4-vision-preview$",
         r"^(text|code)-",
         r"^(davinci|curie|babbage|ada)(-|$)",
     )
