@@ -491,12 +491,24 @@ async def run_eval(
     output_dir.mkdir(parents=True, exist_ok=True)
     md_path = output_dir / "eval_debug.md"
 
-    # Setup logging to file
+    # Setup logging to file (DEBUG) and console (INFO only to avoid tqdm interference)
     log_path = output_dir / "log.txt"
+    log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(log_format))
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(
+        logging.INFO
+    )  # Only INFO+ to console to avoid tqdm interference
+    console_handler.setFormatter(logging.Formatter(log_format))
+
     logging.basicConfig(
         level=logging.DEBUG,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.FileHandler(log_path), logging.StreamHandler()],
+        format=log_format,
+        handlers=[file_handler, console_handler],
     )
     logger = logging.getLogger(__name__)
 
@@ -829,9 +841,10 @@ async def google_client(
         )
     ]
 
-    # Configure thinking for 2.5 models
+    # Configure thinking for models that support it (2.5+ and 3+)
     config = None
-    if "2.5" in model_name:
+    supports_thinking = "2.5" in model_name or "gemini-3" in model_name
+    if supports_thinking:
         config = types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(
                 include_thoughts=True, thinking_budget=thinking_budget

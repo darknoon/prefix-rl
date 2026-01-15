@@ -16,7 +16,7 @@ dependencies = [
     "modal>=1.1.0",
     "numpy>=2.0.2",
     "omegaconf>=2.3.0",
-    "openai>=1.82.0",
+    "openai==2.15.0",
     "pandas>=2.2.3",
     "pillow>=11.2.1",
     "playwright>=1.52.0",
