@@ -93,3 +93,18 @@ Use the debug configurations in `.vscode/launch.json` for step-through debugging
 - `--num_workers`: Parallel processing (default: 1)
 - `--debug_dump`: Generate detailed HTML reports with image comparisons
 
+### Agentic Evaluation (Rasterize-Zoom Harness)
+
+The agentic harness allows models to iteratively refine their SVG output using tools.
+See `prefixrl/harness/rasterize_zoom/README.md` for details.
+
+```sh
+# Run with Claude
+uv run python -m prefixrl.harness.rasterize_zoom \
+    --dataset simple-shapes \
+    --model_name claude-sonnet-4-20250514 \
+    --max_turns 10 \
+    -n 10
+```
+
+Output directory: `eval/{dataset}_{model}_rasterize_zoom/`
