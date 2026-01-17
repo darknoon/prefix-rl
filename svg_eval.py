@@ -195,7 +195,7 @@ async def openai_client(
     return response.choices[0].message.content, None, usage
 
 
-async def openai_reasoning_client(
+async def openai_responses_client(
     prompt: str,
     image: Image.Image,
     model_name: str = "o1-mini",
@@ -1077,7 +1077,7 @@ if __name__ == "__main__":
         )
     elif args.client == "openai-responses":
         client_fn = partial(
-            openai_reasoning_client,
+            openai_responses_client,
             model_name=args.model_name,
             temperature=args.temperature,
         )
