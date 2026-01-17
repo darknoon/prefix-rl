@@ -34,6 +34,7 @@ import asyncio
 import json
 import logging
 import shutil
+import re
 
 load_dotenv()
 
@@ -99,6 +100,78 @@ def prompt_to_messages(prompt: str, image: Image.Image) -> list[dict]:
     ]
 
 
+def prompt_to_responses_input(prompt: str, image: Image.Image) -> list[dict]:
+    return [
+        {
+            "role": "user",
+            "type": "message",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                {
+                    "type": "input_image",
+                    "detail": "auto",
+                    "image_url": image_to_data_url(image),
+                },
+            ],
+        }
+    ]
+
+
+def response_output_text(response) -> str:
+    texts = []
+    for item in response.output:
+        if getattr(item, "type", None) != "message":
+            continue
+        for content in item.content:
+            if getattr(content, "type", None) == "output_text":
+                texts.append(content.text)
+    return "".join(texts)
+
+
+def supports_responses_temperature(model_name: str) -> bool:
+    return "codex" not in model_name
+
+
+def infer_openai_client_variant(model_name: str) -> str:
+    legacy_chat_patterns = (
+        r"^gpt-3\.5",
+        r"^gpt-4$",
+        r"^gpt-4-0314$",
+        r"^gpt-4-0613$",
+        r"^gpt-4-32k$",
+        r"^gpt-4-32k-0314$",
+        r"^gpt-4-32k-0613$",
+        r"^gpt-4-1106-preview$",
+        r"^gpt-4-0125-preview$",
+        r"^gpt-4-vision-preview$",
+        r"^(text|code)-",
+        r"^(davinci|curie|babbage|ada)(-|$)",
+    )
+    if any(re.search(pattern, model_name) for pattern in legacy_chat_patterns):
+        return "openai"
+    return "openai-responses"
+
+
+def infer_client_from_model(model_name: str) -> str:
+    model = model_name.strip()
+    openrouter_prefixes = (
+        "openai/",
+        "anthropic/",
+        "google/",
+    )
+    if any(model.startswith(prefix) for prefix in openrouter_prefixes):
+        return "openrouter"
+    client_patterns = (
+        (r"^claude", "anthropic"),
+        (r"^gemini", "google"),
+        (r"^openrouter/", "openrouter"),
+    )
+    for pattern, client in client_patterns:
+        if re.search(pattern, model):
+            return client
+    return infer_openai_client_variant(model)
+
+
 async def openai_client(
     prompt: str,
     image: Image.Image,
@@ -122,32 +195,34 @@ async def openai_client(
     return response.choices[0].message.content, None, usage
 
 
-async def openai_reasoning_client(
+async def openai_responses_client(
     prompt: str,
     image: Image.Image,
     model_name: str = "o1-mini",
     temperature: float = 0.1,
 ) -> tuple[str, str | None, UsageData]:
-    """OpenAI reasoning client using Responses API to capture thinking tokens"""
+    """OpenAI Responses API client; captures reasoning tokens when available."""
     client = AsyncOpenAI()
-    response = await client.chat.completions.create(
-        model=model_name,
-        messages=prompt_to_messages(prompt, image),
-        temperature=temperature,
+    request_kwargs: dict[str, Any] = {
+        "model": model_name,
+        "input": prompt_to_responses_input(prompt, image),
+    }
+    if supports_responses_temperature(model_name):
+        request_kwargs["temperature"] = temperature
+    response = await client.responses.create(
+        **request_kwargs,
     )
 
-    content = response.choices[0].message.content or ""
+    content = response_output_text(response)
 
     # For reasoning models, check for reasoning tokens in usage
     reasoning_tokens = None
-    if response.usage and hasattr(response.usage, "completion_tokens_details"):
-        details = response.usage.completion_tokens_details
-        if details and hasattr(details, "reasoning_tokens"):
-            reasoning_tokens = details.reasoning_tokens
+    if response.usage and getattr(response.usage, "output_tokens_details", None):
+        reasoning_tokens = getattr(response.usage.output_tokens_details, "reasoning_tokens", None)
 
     usage = UsageData(
-        prompt_tokens=response.usage.prompt_tokens if response.usage else None,
-        completion_tokens=response.usage.completion_tokens if response.usage else None,
+        prompt_tokens=response.usage.input_tokens if response.usage else None,
+        completion_tokens=response.usage.output_tokens if response.usage else None,
         reasoning_tokens=reasoning_tokens,
         total_tokens=response.usage.total_tokens if response.usage else None,
     )
@@ -451,12 +526,16 @@ def calculate_stats(
 
 async def run_eval(
     config: DatasetConfig,
-    client: Callable[[str, Image.Image], Awaitable[tuple[str, str | None]]],
+    client: Callable[
+        [str, Image.Image], Awaitable[tuple[str, str | None, UsageData]]
+    ],
     output_dir: Path,
     num_eval_examples: int = 100,
     debug_dump: bool = False,
     num_workers: int = 1,
     model_name: str | None = None,
+    early_abort_min_examples: int = 10,
+    early_abort_failure_rate: float = 0.6,
 ):
     if model_name is None:
         raise ValueError("model_name must be provided")
@@ -640,7 +719,14 @@ async def run_eval(
             return i, await worker(i, example)
 
     # Create tasks for all examples
-    tasks = [bounded_worker(i, ex) for i, ex in enumerate(example_list)]
+    tasks = [
+        asyncio.create_task(bounded_worker(i, ex))
+        for i, ex in enumerate(example_list)
+    ]
+
+    processed_examples = 0
+    failed_example_count = 0
+    early_abort_enabled = early_abort_min_examples > 0 and early_abort_failure_rate > 0
 
     # Execute tasks with progress bar
     for task in tqdm(
@@ -654,6 +740,27 @@ async def run_eval(
         records[i] = record
         thinkings[i] = thinking
         usages[i] = usage
+        processed_examples += 1
+        if record["status"] == "FAIL":
+            failed_example_count += 1
+
+        if (
+            early_abort_enabled
+            and processed_examples >= early_abort_min_examples
+            and (failed_example_count / processed_examples) >= early_abort_failure_rate
+        ):
+            failure_rate = failed_example_count / processed_examples
+            abort_message = (
+                f"Aborting early after {processed_examples} examples: "
+                f"{failed_example_count} failures ({failure_rate:.1%}) meets "
+                f"threshold {early_abort_failure_rate:.1%}."
+            )
+            logger.error(abort_message)
+            for pending in tasks:
+                if not pending.done():
+                    pending.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise LLMClientException(abort_message)
 
     # Calculate success rate
     total_examples = len(results)
@@ -907,8 +1014,16 @@ parser.add_argument(
 parser.add_argument(
     "--client",
     type=str,
-    default="openai",
-    choices=["openai", "openai-responses", "anthropic", "google", "vllm", "openrouter"],
+    default="auto",
+    choices=[
+        "auto",
+        "openai",
+        "openai-responses",
+        "anthropic",
+        "google",
+        "vllm",
+        "openrouter",
+    ],
     help="Which client/model to use.",
 )
 parser.add_argument(
@@ -947,6 +1062,18 @@ parser.add_argument(
     default=1.0,
     help="Temperature for generation (default: 1.0). Higher values make output more random, lower values make it more deterministic.",
 )
+parser.add_argument(
+    "--early_abort_min_examples",
+    type=int,
+    default=10,
+    help="Abort if failure rate is high after this many completed examples (<=0 disables).",
+)
+parser.add_argument(
+    "--early_abort_failure_rate",
+    type=float,
+    default=0.6,
+    help="Failure rate threshold for early abort (e.g., 0.6 = 60%).",
+)
 
 
 if __name__ == "__main__":
@@ -954,13 +1081,16 @@ if __name__ == "__main__":
 
     dataset_config = datasets[args.dataset]
 
+    if args.client == "auto":
+        args.client = infer_client_from_model(args.model_name)
+
     if args.client == "openai":
         client_fn = partial(
             openai_client, model_name=args.model_name, temperature=args.temperature
         )
     elif args.client == "openai-responses":
         client_fn = partial(
-            openai_reasoning_client,
+            openai_responses_client,
             model_name=args.model_name,
             temperature=args.temperature,
         )
@@ -1025,6 +1155,8 @@ if __name__ == "__main__":
             debug_dump=args.debug_dump,
             num_workers=args.num_workers,
             model_name=args.model_name,
+            early_abort_min_examples=args.early_abort_min_examples,
+            early_abort_failure_rate=args.early_abort_failure_rate,
         )
     )
 
