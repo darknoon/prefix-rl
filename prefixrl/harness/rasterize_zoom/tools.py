@@ -4,10 +4,10 @@ Tool definitions for the agentic evaluation harness.
 
 from dataclasses import dataclass
 from typing import Any
-from PIL import Image
 import json
 
 from .virtual_fs import VirtualFS
+from .metrics import MetricsComputer
 
 
 @dataclass
@@ -142,15 +142,13 @@ class ToolExecutor:
         self.svg_filename = svg_filename
         self.raster_min_size = raster_min_size
         self.raster_max_size = raster_max_size
-        self._metrics_computer: "MetricsComputer | None" = None
+        self._metrics_computer: MetricsComputer | None = None
         self._rasterize_counter: int = 0
 
     @property
-    def metrics_computer(self) -> "MetricsComputer":
+    def metrics_computer(self) -> MetricsComputer:
         """Lazy-load the metrics computer."""
         if self._metrics_computer is None:
-            from .metrics import MetricsComputer
-
             self._metrics_computer = MetricsComputer()
         return self._metrics_computer
 
@@ -182,7 +180,9 @@ class ToolExecutor:
         self.vfs.write(self.svg_filename, content)
         return ToolResult(
             success=True,
-            data={"message": f"Successfully wrote {len(content)} bytes to {self.svg_filename}"},
+            data={
+                "message": f"Successfully wrote {len(content)} bytes to {self.svg_filename}"
+            },
         )
 
     def _search_replace(self, tool_input: dict) -> ToolResult:

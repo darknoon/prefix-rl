@@ -6,7 +6,6 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 from base64 import b64encode
 from io import BytesIO
 
@@ -14,7 +13,7 @@ import anthropic
 from PIL import Image
 
 from .virtual_fs import VirtualFS
-from .tools import ToolExecutor, TOOL_DEFINITIONS, ToolResult
+from .tools import ToolExecutor, TOOL_DEFINITIONS
 
 logger = logging.getLogger(__name__)
 

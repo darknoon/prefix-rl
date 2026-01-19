@@ -336,14 +336,13 @@ async def run_eval(
                         tool_input = tc.get("input", {})
                         if tool_name == "write":
                             content = tool_input.get("content", "")
-                            preview = content[:200] + "..." if len(content) > 200 else content
                             f.write(f"- `write`: {len(content)} chars\n")
                         elif tool_name == "search_replace":
                             old = tool_input.get("old_string", "")[:50]
                             new = tool_input.get("new_string", "")[:50]
                             f.write(f"- `search_replace`: \"{old}\" → \"{new}\"\n")
                         elif tool_name == "rasterize_svg":
-                            f.write(f"- `rasterize_svg`\n")
+                            f.write("- `rasterize_svg`\n")
                         else:
                             f.write(f"- `{tool_name}`\n")
                 if turn.response_text:
@@ -434,7 +433,7 @@ def main():
         temperature=args.temperature,
     )
 
-    results = asyncio.run(
+    asyncio.run(
         run_eval(
             config=dataset_config,
             output_dir=output_dir,

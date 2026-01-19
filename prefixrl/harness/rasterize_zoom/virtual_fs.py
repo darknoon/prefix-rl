@@ -4,8 +4,8 @@ Files are stored in memory (dict) to avoid sandboxing complexity.
 """
 
 from dataclasses import dataclass, field
-from typing import BinaryIO
 from io import BytesIO
+from pathlib import Path
 from PIL import Image
 
 
@@ -102,9 +102,8 @@ class VirtualFS:
         self._image_counter += 1
         return filename
 
-    def save_to_disk(self, output_dir: "Path") -> dict[str, "Path"]:
+    def save_to_disk(self, output_dir: Path) -> dict[str, Path]:
         """Save all files to disk. Returns mapping of vfs filename -> disk path."""
-        from pathlib import Path
         
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
