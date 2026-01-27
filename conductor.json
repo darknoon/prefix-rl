@@ -1,5 +1,5 @@
 {
   "scripts": {
-    "setup": "uv sync && ln -s \"$CONDUCTOR_ROOT_PATH/.env\" .env"
+    "setup": "uv sync && ln -s \"$CONDUCTOR_ROOT_PATH/.env\" .env && bash -lc 'if [ -L models ]; then exit 0; fi; if [ -d models ] && [ -z \"$(ls -A models)\" ]; then rmdir models; fi; if [ ! -e models ]; then shared_dir=$(cd \"$(git rev-parse --git-common-dir)/..\" && pwd); ln -s \"$shared_dir/models\" models; fi'"
   }
 }

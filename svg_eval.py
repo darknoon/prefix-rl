@@ -263,6 +263,129 @@ async def openrouter_client(
     return response.choices[0].message.content, None, usage
 
 
+async def quiver_vectorize_client(
+    prompt: str,
+    image: Image.Image,
+    model_name: str = "arrow-0.5",
+    temperature: float | None = None,
+    top_p: float | None = None,
+    max_output_tokens: int | None = None,
+    frequency_penalty: float | None = None,
+    presence_penalty: float | None = None,
+    seed: int | None = None,
+    n: int | None = None,
+    simplify_if_needed: bool | None = None,
+    auto_crop: bool | None = None,
+    stream: bool = False,
+    base_url: str | None = None,
+    timeout: float | None = 120.0,
+) -> tuple[str, str | None, UsageData]:
+    """Quiver vectorization client (image -> SVG). Prompt is ignored."""
+    del prompt
+
+    api_key = os.getenv("QUIVER_API_KEY")
+    if not api_key:
+        raise LLMClientException("QUIVER_API_KEY is not set.")
+
+    base_url = base_url or os.getenv("QUIVER_API_BASE_URL", "https://api.quiver.ai")
+    url = f"{base_url.rstrip('/')}/v1/svgs/vectorizations"
+
+    payload: dict[str, Any] = {
+        "model": model_name,
+        "stream": stream,
+        "image": {"base64": image_to_base64(image)},
+    }
+
+    if n is not None:
+        payload["n"] = n
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if top_p is not None:
+        payload["top_p"] = top_p
+    if max_output_tokens is not None:
+        payload["max_output_tokens"] = max_output_tokens
+    if frequency_penalty is not None:
+        payload["frequency_penalty"] = frequency_penalty
+    if presence_penalty is not None:
+        payload["presence_penalty"] = presence_penalty
+    if seed is not None:
+        payload["seed"] = seed
+    if simplify_if_needed is not None:
+        payload["simplify_if_needed"] = simplify_if_needed
+    if auto_crop is not None:
+        payload["auto_crop"] = auto_crop
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    if not stream:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+
+        svg_items = data.get("data", [])
+        if not svg_items:
+            raise LLMClientException("Quiver response missing SVG data.")
+
+        usage_payload = data.get("usage")
+        usage = UsageData(
+            prompt_tokens=usage_payload.get("input_tokens") if usage_payload else None,
+            completion_tokens=usage_payload.get("output_tokens")
+            if usage_payload
+            else None,
+            reasoning_tokens=None,
+            total_tokens=usage_payload.get("total_tokens") if usage_payload else None,
+        )
+        return svg_items[0].get("svg", ""), None, usage
+
+    headers["Accept"] = "text/event-stream"
+    final_svg = ""
+    usage = UsageData(
+        prompt_tokens=None,
+        completion_tokens=None,
+        reasoning_tokens=None,
+        total_tokens=None,
+    )
+    current_event: str | None = None
+
+    async with httpx.AsyncClient(timeout=None) as client:
+        async with client.stream("POST", url, json=payload, headers=headers) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                if line.startswith("event:"):
+                    current_event = line.split(":", 1)[1].strip()
+                    continue
+                if not line.startswith("data:"):
+                    continue
+
+                data_line = line.split(":", 1)[1].strip()
+                if data_line == "[DONE]":
+                    break
+                try:
+                    payload_json = json.loads(data_line)
+                except json.JSONDecodeError:
+                    continue
+
+                event_type = payload_json.get("type") or current_event
+                if event_type == "content":
+                    final_svg = payload_json.get("svg", "")
+                    usage_payload = payload_json.get("usage")
+                    if usage_payload:
+                        usage = UsageData(
+                            prompt_tokens=usage_payload.get("input_tokens"),
+                            completion_tokens=usage_payload.get("output_tokens"),
+                            reasoning_tokens=None,
+                            total_tokens=usage_payload.get("total_tokens"),
+                        )
+
+    if not final_svg:
+        raise LLMClientException("Quiver streaming response missing content SVG.")
+
+    return final_svg, None, usage
+
+
 def debug_compare_md(
     result: Optional[PreprocessedResponse] = None,
     image_scores: Optional[ImageComparisonResult] = None,
@@ -908,14 +1031,22 @@ parser.add_argument(
     "--client",
     type=str,
     default="openai",
-    choices=["openai", "openai-responses", "anthropic", "google", "vllm", "openrouter"],
+    choices=[
+        "openai",
+        "openai-responses",
+        "anthropic",
+        "google",
+        "vllm",
+        "openrouter",
+        "quiver",
+    ],
     help="Which client/model to use.",
 )
 parser.add_argument(
     "--model_name",
     type=str,
     default="gpt-4.1-mini",
-    help="Model name for OpenAI/OpenAI-responses/Anthropic/Google/vLLM clients. For vllm, you must also start the vLLM server separately with the correct model.",
+    help="Model name for OpenAI/OpenAI-responses/Anthropic/Google/vLLM/Quiver clients. For vllm, you must also start the vLLM server separately with the correct model.",
 )
 parser.add_argument(
     "--vllm_endpoint",
@@ -1002,6 +1133,15 @@ if __name__ == "__main__":
             vllm_client,
             server_url=args.vllm_endpoint,
             model_name=args.model_name,
+            temperature=args.temperature,
+        )
+    elif args.client == "quiver":
+        model_name = (
+            "arrow-0.5" if args.model_name == "gpt-4.1-mini" else args.model_name
+        )
+        client_fn = partial(
+            quiver_vectorize_client,
+            model_name=model_name,
             temperature=args.temperature,
         )
     else:

@@ -4,12 +4,12 @@ DreamSim distance computation for perceptual image comparison.
 Based on the DreamSim library: https://github.com/ssundaram21/dreamsim
 """
 
-import os
 import logging
 import torch
 from PIL import Image
 from typing import Optional
 
+from prefixrl.utils.cache import resolve_dreamsim_cache_dir
 from .util import resize_to_reference_image
 
 logger = logging.getLogger(__name__)
@@ -31,12 +31,12 @@ class DreamSimComparator:
         Args:
             device: Device to run the model on ("cpu" or "cuda")
             cache_dir: Directory to cache model weights. If None, uses DREAMSIM_CACHE_DIR
-                      environment variable or defaults to "./models"
+                      or a shared repo models dir (git common dir), falling back to "./models"
         """
         self.device = device
 
         if cache_dir is None:
-            cache_dir = os.environ.get("DREAMSIM_CACHE_DIR", "./models")
+            cache_dir = resolve_dreamsim_cache_dir()
 
         logger.info("Loading DreamSim model (from dreamsim library)...")
         try:

@@ -12,7 +12,6 @@ from PIL import Image as PILImage
 import io
 import numpy as np
 import torchvision.transforms as T
-import os
 import tempfile
 import wandb
 from pathlib import Path
@@ -23,6 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from dreamsim import dreamsim
+from prefixrl.utils.cache import resolve_dreamsim_cache_dir
 
 # Minimum reward value for failed evaluations
 MIN_REWARD = -1.0
@@ -190,8 +190,10 @@ class ImageComparator:
     def __init__(
         self,
         device: str = "cpu",
-        dreamsim_cache_dir: str = os.environ.get("DREAMSIM_CACHE_DIR", "./models"),
+        dreamsim_cache_dir: str | None = None,
     ):
+        if dreamsim_cache_dir is None:
+            dreamsim_cache_dir = resolve_dreamsim_cache_dir()
         self.device = device
         logger.info("Loading DreamSim model (from dreamsim library)...")
         try:
